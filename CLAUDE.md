@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Guidance for Claude Code when working in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## What this is
 
@@ -13,6 +13,7 @@ Specs and roadmap: `docs/superpowers/specs/complementer-design.md` (what is buil
 ```
 npm run build   # clean, tsc (src + test), tsc (webview script), copy hook.sh / panel.html / panel.css into out/
 npm test        # builds, then node:test on out/test, 87 tests; must pass
+npm run build && node --test out/test/logs.test.js   # one test file (add --test-name-pattern="..." for one test)
 npm run lint    # ESLint (also enforces naming and const/let)
 npm run check   # tsc --noEmit over two projects: src + test, and src/views/panel.ts (the webview script, with DOM types)
 npm run package # runs lint + check + tests, then builds (`out/` is git-ignored; the .vsix ships `out/src` only) release/complementer-<version>.vsix
