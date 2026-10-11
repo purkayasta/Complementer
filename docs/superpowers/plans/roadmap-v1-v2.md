@@ -1,6 +1,6 @@
-# Complementer: Roadmap v1 / v2 / v3
+# Complementer: Roadmap v1 and v2
 
-Companion to `../specs/complementer-design.md`, which describes what is built. v1 is built. v2 is next. **v3 is a proposal** from earlier "later" ideas and the spike findings; change it freely.
+Companion to `../specs/complementer-design.md`, which describes what is built. v1 and v2 are two milestones that ship together as one release, **1.0.0 (stable)**. Both are built; what is left is the manual checks below and publishing. Nothing is planned after 1.0.0 yet.
 
 ## v1: Live meters, session manager, insights (built)
 
@@ -32,16 +32,11 @@ Companion to `../specs/complementer-design.md`, which describes what is built. v
 
 **Verification so far:** 69 tests (unit, webview against a fake DOM, extension against a stubbed `vscode` and a fake home), lint, strict `tsc` over two projects, an independent recount of token totals, and real-data smoke runs.
 
-**Not yet verified** (do before any release):
-- A real VS Code run of the final UI, including colours and layout in your theme and the `src/views/` loading under the real CSP.
-- New session and click-to-open on a real install (`claude-vscode.primaryEditor.open`).
+**Verified by hand on macOS** (real VS Code): the UI, live meters (enable, disable, uninstall restoring `statusLine`).
+
+**Not yet verified** (do before publishing 1.0.0):
 - Linux, and Windows (`hook.js`, path matching): unit-tested on macOS only.
 - Whether sessions from another project folder resume properly in the current workspace.
-
-**Before publishing:**
-- Publisher ID is decided: `pritompurkayasta` (extension ID `pritompurkayasta.complementer`).
-- Decide between the Marketplace and `.vsix` files on GitHub releases (packages are build output and are never committed). One `README.md` serves both GitHub and the Marketplace page, so keep it plain: `vsce` rejects SVG images and rewrites relative links (including `media/*.png`, which is not packaged) using `repository` in `package.json`, so the images must be pushed to GitHub.
-- Create the GitHub repository (named `complementer`; `repository`, `homepage` and `bugs` in `package.json` already point at `github.com/purkayasta/complementer`).
 
 ## v2: What is eating my context
 
@@ -53,39 +48,33 @@ Companion to `../specs/complementer-design.md`, which describes what is built. v
 - Method: measure each kind's size in characters and scale so the parts sum exactly to the measured growth. The total is exact; the split is labelled as an estimate.
 - Decision: ship "baseline + growth split by kind and tool", not a fake system-prompt breakdown.
 
-| # | Task | Done when |
-|---|---|---|
-| 1 | A `breakdown` module over the session log (reads via `iterateLineBatches`; pure computation in the view model), with tests on fixtures | Parts sum to the measured context within a stated tolerance |
-| 2 | Breakdown section in the panel for the selected session: stacked bar and list, largest first | Matches `/context` for a manual check in a real session |
-| 3 | Top offenders: largest tool results and files read, with the turn they came from | Each item shows size and turn |
+| # | Task | Done when | Status |
+|---|---|---|---|
+| 1 | A `breakdown` module over the session log (reads via `iterateLineBatches`; pure computation in the view model), with tests on fixtures | Parts sum to the measured context within a stated tolerance | Done |
+| 2 | Breakdown inside Usage for the selected session: a full-width stacked bar under the Context meter, with the list and top items under a collapsed "Details" | Matches `/context` for a manual check in a real session | Built; manual check against `/context` still to do |
+| 3 | Top offenders: largest tool results and files read, with the turn they came from | Each item shows size and turn | Done |
+
+Skills used (per session, in Details) and Top skills (Insights) were added to v2; see `../specs/2026-10-11-context-breakdown-and-skills-design.md`.
 
 **Risk:** the split can only be approximate. If it proves too noisy, ship fewer, honest categories.
 
-## v3 (proposal): Act on the numbers
+## Release 1.0.0
 
-**Outcome:** the extension helps the user avoid hitting limits instead of only showing them. Colour thresholds (yellow above 50%, red from 80%) already exist; v3 adds notifications and forecasts.
+v1 and v2 are published together as `1.0.0`; `package.json` and `CHANGELOG.md` say so.
 
-| # | Feature | Notes |
-|---|---|---|
-| 1 | Prompt-cache meter | From `prompt_cache` (`hit_ratio`, `expires_at`, `recache_tokens_if_cold`): "cache cold in 4m" and how many tokens a cold restart re-caches |
-| 2 | Threshold notifications | Optional, off by default, once per window, at configurable levels |
-| 3 | Burn-rate forecast | "At this pace the 5-hour window ends at 14:20", from recent usage slope; needs enough samples |
-| 4 | Compaction warning | Warn before auto-compact and suggest `/compact` (text only; we cannot run it in the official panel) |
-| 5 | Token budgets | Optional daily or monthly token budget per project, shown in the panel |
-| 6 | Export | Insights and history to CSV or JSON on demand (local file, no upload) |
-| 7 | Multi-session overview | Per-session meters side by side (per-session live files already exist) |
-| 8 | Window-size table | Optional user-filled model to window size map, only if users ask for context % on old models that never report live |
+**Before publishing:**
+- Publisher ID is decided: `pritompurkayasta` (extension ID `pritompurkayasta.complementer`).
+- Decide between the Marketplace and `.vsix` files on GitHub releases (packages are build output and are never committed). One `README.md` serves both GitHub and the Marketplace page, so keep it plain: `vsce` rejects SVG images and rewrites relative links (including `media/*.png`, which is not packaged) using `repository` in `package.json`, so the images must be pushed to GitHub.
+- Create the GitHub repository (named `complementer`; `repository`, `homepage` and `bugs` in `package.json` already point at `github.com/purkayasta/complementer`).
 
-**Order by value and effort:** 1 and 2 are cheap (data already in the payload), then 3 and 4, then 5 to 7. Item 8 only on demand.
+**Still to verify by hand before publishing:** the v1 items under "Not yet verified" above, and the v2 breakdown against `/context` in a real session.
 
-**Risk:** wrong forecasts or noisy alerts cost trust. Gate 3 behind enough samples and label it as an estimate.
-
-## Cross-cutting rules (all versions)
+## Cross-cutting rules
 
 - Nothing leaves the machine. No telemetry.
 - Every external format (log, payload, official commands) is parsed or called in one place and treated as optional.
 - Show only what can be read. No guessing and no fake precision.
 - Persisted shapes change only with a migration and a test.
 - New behaviour goes into `view-model.ts` (pure, tested) before it goes into `extension.ts`.
-- Each version ends with a manual check against `/context` and `/usage` in a real session.
-- Do not start a version before the previous one's exit criteria hold.
+- Each milestone ends with a manual check against `/context` and `/usage` in a real session.
+- Do not start a milestone before the previous one's exit criteria hold.

@@ -4,7 +4,7 @@ import assert from 'node:assert';
 import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import vm from 'node:vm';
-import type { DayInsight, PanelState, RangeInsight } from '../src/types';
+import type { Breakdown, DayInsight, PanelState, RangeInsight } from '../src/types';
 import { renderPanelHtml } from '../src/view-model';
 
 const VIEWS_DIRECTORY = path.join(__dirname, '..', 'src', 'views');
@@ -111,7 +111,16 @@ function dayInsight(dayOfMonth: number, totalTokens: number): DayInsight {
   return { date: `2026-10-${String(dayOfMonth).padStart(2, '0')}`, totalTokens, ...(totalTokens ? { outputTokens: 5, topProjects: [['proj', totalTokens]] } : {}) };
 }
 
-const RANGE: RangeInsight = { inputTokens: 10, cacheCreationTokens: 20, cacheReadTokens: 970, outputTokens: 5, activeDays: 2, projects: [['proj', 1005]], models: [['claude-sonnet-5-5', 1005]] };
+const RANGE: RangeInsight = { inputTokens: 10, cacheCreationTokens: 20, cacheReadTokens: 970, outputTokens: 5, activeDays: 2, projects: [['proj', 1005]], models: [['claude-sonnet-5-5', 1005]], skills: [['code-review', 19], ['docs-graph', 9]] };
+
+const BREAKDOWN = {
+  baselineTokens: 1000,
+  totalTokens: 1600,
+  windowSize: 10000,
+  parts: [{ kind: 'toolResults', tokens: 450 }, { kind: 'assistantText', tokens: 150 }],
+  tools: [['Read', 300], ['Bash', 150]],
+  biggestResults: [{ tool: 'Read', target: '<img src=x onerror=1>', tokens: 300, turn: 3 }],
+} satisfies Breakdown;
 
 const STATE: PanelState = {
   account: { email: 'a@b.co', plan: 'Team · Standard', organization: 'Acme' },
@@ -200,4 +209,50 @@ test('panel shows empty states without crashing', async () => {
   assert.match(elementsById['chat-empty'].textContent, /No chats found/);
   assert.match(elementsById['insights-body'].textContent, /No usage recorded yet/);
   assert.strictEqual(elementsById['usage-note'].textContent, 'Live meters are off.');
+});
+
+test('context breakdown: a bar and legend by default, details on demand, log names only as text', async () => {
+  const { elementsById, sendState } = await loadPanel();
+  sendState({ ...STATE, usage: { ...STATE.usage, breakdown: BREAKDOWN, skills: [['code-review', 8], ['docs-graph', 4]] } });
+  const meters = elementsById.meters;
+  assert.strictEqual(findAll(meters, hasClass('breakdown-segment')).length, 3); // baseline and two parts
+  const segmentWidths = findAll(meters, hasClass('breakdown-segment')).map((segment) => parseFloat(segment.styleProperties.width));
+  assert.strictEqual(segmentWidths.reduce((sum, width) => sum + width, 0), 100); // the bar is the whole used context, however full the window is
+  assert.deepStrictEqual(findAll(meters, hasClass('breakdown-stack'))[0].styleProperties, {}); // full width: no width of its own
+  assert.match(findAll(meters, hasClass('breakdown-legend'))[0].textContent, /Baseline 1\.0k · Tool results ~450 · Assistant text ~150/);
+  assert.strictEqual(findAll(meters, hasClass('details')).length, 0); // collapsed by default
+  findAll(meters, hasClass('details-toggle'))[0].listeners.click();
+  const details = findAll(meters, hasClass('details'))[0];
+  assert.match(details.textContent, /Baseline \(fixed\)1\.0k/);
+  assert.match(details.textContent, /Read~300/); // per-tool subtotal
+  assert.match(details.textContent, /Biggest items/);
+  assert.match(details.textContent, /turn 3/);
+  assert.match(details.textContent, /Skills used/);
+  assert.match(details.textContent, /code-review×8/);
+  assert.match(details.textContent, /The split is an estimate/);
+  assert.ok(details.textContent.includes('<img src=x onerror=1>')); // shown as text...
+  assert.strictEqual(findAll(meters, (element) => element.tagName === 'img').length, 0); // ...never as markup
+  findAll(meters, hasClass('details-toggle'))[0].listeners.click();
+  assert.strictEqual(findAll(meters, hasClass('details')).length, 0); // and closes again
+});
+
+test('context breakdown: skills alone still get a Details toggle, nothing at all gets none', async () => {
+  const { elementsById, sendState } = await loadPanel();
+  sendState({ ...STATE, usage: { ...STATE.usage, skills: [['code-review', 2]] } });
+  assert.strictEqual(findAll(elementsById.meters, hasClass('breakdown-segment')).length, 0); // no breakdown without a window size or growth
+  assert.strictEqual(findAll(elementsById.meters, hasClass('details-toggle')).length, 1);
+  sendState(STATE);
+  assert.strictEqual(findAll(elementsById.meters, hasClass('details-toggle')).length, 0);
+});
+
+test('insights list the most used skills for the chosen range, and nothing when there are none', async () => {
+  const { elementsById, sendState } = await loadPanel();
+  sendState(STATE);
+  const text = elementsById['insights-body'].textContent;
+  assert.match(text, /Top skills/);
+  assert.match(text, /code-review×19/);
+  assert.match(text, /Counts uses, not tokens/);
+  const noSkills = { ...RANGE, skills: [] };
+  sendState({ ...STATE, insights: { ...STATE.insights, ranges: { 7: noSkills, 30: noSkills, 90: noSkills } } });
+  assert.doesNotMatch(elementsById['insights-body'].textContent, /Top skills/);
 });

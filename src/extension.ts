@@ -4,12 +4,14 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
-import { History, Scanner } from './logs';
+import { History, Scanner, listLogFiles } from './logs';
 import { LiveFeed, readAccountIfChanged } from './live';
 import { ChatIndex, renderTranscript, getSessionPaths } from './chats';
+import { SkillHistory } from './skills';
+import { createSessionTally, readSessionTally } from './breakdown';
 import * as setup from './setup';
 import * as viewModel from './view-model';
-import type { Account, Chat, LiveState, Meters, PanelMessage, SetupPaths, WindowSizeReport, WindowState } from './types';
+import type { Account, Chat, LiveState, Meters, PanelMessage, SessionTally, SetupPaths, WindowSizeReport, WindowState } from './types';
 import { VIEWS_DIRECTORY, CONFIG_SECTION, CHAT_SCHEME, CLAUDE_OPEN_COMMAND, REFRESH_DEBOUNCE_MS, SCAN_DEBOUNCE_MS, SAVE_DEBOUNCE_MS, POLL_INTERVAL_MS, CLOCK_TICK_MS, ACTIVE_SESSION_MS } from './consts';
 import { tryReadText, filterExistingPaths, tryParseJson, errorMessage } from './utils';
 
@@ -39,6 +41,14 @@ class ComplementerExtension {
 
   /** Logs that changed since the last scan. */
   changedLogFiles = new Set<string>();
+
+  /** What has been read of the shown session's log, for the context breakdown and its skills. */
+  sessionTally: SessionTally = createSessionTally();
+
+  /** The log `sessionTally` belongs to. */
+  sessionTallyPath: string | undefined;
+
+  pendingTallyReads: Promise<unknown> = Promise.resolve();
 
   refreshTimer: NodeJS.Timeout | undefined;
 
@@ -78,6 +88,7 @@ class ComplementerExtension {
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly history: History,
+    private readonly skillHistory: SkillHistory,
     private readonly panelTemplate: string,
     private readonly windowSizes: Record<string, number>,
   ) {
@@ -92,12 +103,13 @@ class ComplementerExtension {
   static async create(context: vscode.ExtensionContext): Promise<ComplementerExtension> {
     const storageDirectory = context.globalStorageUri.fsPath;
     await fsPromises.mkdir(storageDirectory, { recursive: true });
-    const [history, panelTemplate, windowSizesText] = await Promise.all([
+    const [history, skillHistory, panelTemplate, windowSizesText] = await Promise.all([
       History.load(path.join(storageDirectory, 'history.json')),
+      SkillHistory.load(path.join(storageDirectory, 'skills.json')),
       fsPromises.readFile(path.join(VIEWS_DIRECTORY, 'panel.html'), 'utf8'),
       tryReadText(path.join(storageDirectory, 'windows.json')),
     ]);
-    return new ComplementerExtension(context, history, panelTemplate, tryParseJson(windowSizesText ?? '') ?? {});
+    return new ComplementerExtension(context, history, skillHistory, panelTemplate, tryParseJson(windowSizesText ?? '') ?? {});
   }
 
   /** Register everything with VS Code and start the background work. */
@@ -121,7 +133,7 @@ class ComplementerExtension {
     this.refreshHookCopy();
     this.refreshLiveEnabled();
     this.liveFeed.start().then(() => this.requestRefresh());
-    this.scanner.scan().then((hadNewData) => this.onScanComplete(hadNewData)); // the first catch-up runs off the activation path
+    this.scanLogs().then((hadNewData) => this.onScanComplete(hadNewData)); // the first catch-up runs off the activation path
     this.scheduleChatIndexing(500);
   }
 
@@ -133,9 +145,9 @@ class ComplementerExtension {
     this.liveFeed.dispose();
   }
 
-  /** Write the history now; VS Code waits for this on shutdown, so totals are not lost. */
+  /** Write the history and the skill counts now; VS Code waits for this on shutdown, so nothing is lost. */
   flushHistory() {
-    return this.history.save().catch(() => {});
+    return Promise.all([this.history.save(), this.skillHistory.save()]).catch(() => {});
   }
 
   workspaceFolders(): string[] {
@@ -238,9 +250,29 @@ class ComplementerExtension {
     return tooltip;
   }
 
+  /** Point the tally at the shown session's log (dropping the old one) and read what is new in it. */
+  followSessionLog(chat: Chat | undefined) {
+    if (chat?.filePath !== this.sessionTallyPath) {
+      this.sessionTally = createSessionTally();
+      this.sessionTallyPath = chat?.filePath;
+    }
+    this.updateSessionTally();
+  }
+
+  updateSessionTally() {
+    const filePath = this.sessionTallyPath;
+    if (!filePath) return;
+    const { sessionTally } = this;
+    this.pendingTallyReads = this.pendingTallyReads
+      .then(() => readSessionTally(filePath, sessionTally))
+      .then((hadNewData) => hadNewData && this.requestRefresh())
+      .catch(() => {}); // the log may have vanished; the next refresh tries again
+  }
+
   /** Only a visible panel is updated, and only when its state actually changed (no needless re-render). */
   postPanel(meters: Meters = this.computeMeters()) {
     if (!this.panelView?.visible) return;
+    this.followSessionLog(meters.chat);
     const state = viewModel.buildPanelState({
       meters,
       account: this.account,
@@ -249,7 +281,9 @@ class ComplementerExtension {
       chats: this.chatIndex.chats,
       workspaceFolders: this.workspaceFolders(),
       windowSizes: this.windowSizes,
-      insights: viewModel.computeInsights(this.history.days, new Date()),
+      insights: viewModel.computeInsights(this.history.days, new Date(), this.skillHistory.days),
+      breakdown: viewModel.computeBreakdown(this.sessionTally, meters.contextWindowSize),
+      sessionSkills: viewModel.topSessionSkills(this.sessionTally.skillCounts),
       selectedSessionId: this.selectedSessionId,
       nowMs: Date.now(),
     });
@@ -487,11 +521,21 @@ class ComplementerExtension {
     }
   }
 
+  /**
+   * Count token usage and skill calls in the given logs, or in every log when none are given.
+   * @returns true if either found new data
+   */
+  async scanLogs(filePaths?: string[]): Promise<boolean> {
+    const logFiles = filePaths ?? (await listLogFiles(this.projectsRoot));
+    const [hadNewUsage, hadNewSkills] = await Promise.all([this.scanner.scan(logFiles), this.skillHistory.scan(logFiles)]);
+    return hadNewUsage || hadNewSkills;
+  }
+
   scanChangedLogs() {
     this.scanTimer = undefined;
     const changedFiles = [...this.changedLogFiles];
     this.changedLogFiles.clear();
-    this.scanner.scan(changedFiles).then((hadNewData) => this.onScanComplete(hadNewData));
+    this.scanLogs(changedFiles).then((hadNewData) => this.onScanComplete(hadNewData));
   }
 
   onScanComplete(hadNewData: boolean) {
@@ -515,7 +559,7 @@ class ComplementerExtension {
 
   /** A fallback for when watching misses something: stat-only for unchanged files. */
   poll() {
-    this.scanner.scan().then((hadNewData) => this.onScanComplete(hadNewData));
+    this.scanLogs().then((hadNewData) => this.onScanComplete(hadNewData));
     this.refreshAccount();
     this.refreshLiveEnabled();
     if (!this.liveFeed.watcher) this.liveFeed.reloadAll().then(() => this.requestRefresh());

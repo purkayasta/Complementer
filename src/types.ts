@@ -56,6 +56,82 @@ export interface FileState {
   lastResponse: LastResponse | null;
 }
 
+// ---- breakdown and skills ----
+
+/** What a stretch of context is made of. The fixed baseline is not a kind: it is measured, not split. */
+export type ContentKind = 'toolResults' | 'toolCalls' | 'assistantText' | 'assistantThinking' | 'userText' | 'attachments';
+
+/** A tool call whose result has not been read yet. */
+export interface PendingToolUse {
+  tool: string;
+  /** The file, command or pattern the call was about, cut short. */
+  target: string;
+  turn: number;
+}
+
+export interface ToolResultSize {
+  tool: string;
+  target: string;
+  characters: number;
+  turn: number;
+}
+
+/** What has been read so far from one session log. Sizes and names only: chat text is never kept. */
+export interface SessionTally {
+  /** Byte offset of the first unread complete line (the cursor for iterateLineBatches). */
+  offset: number;
+  /** Distinct assistant responses seen so far. */
+  turn: number;
+  lastMessageId: string;
+  /** Context tokens at the first response: the fixed part (system prompt, tools, memory) plus the first prompt. */
+  baselineTokens: number | undefined;
+  /** Context tokens at the latest response. */
+  latestTokens: number | undefined;
+  characters: Record<ContentKind, number>;
+  /** Tool name -> characters of its results. */
+  toolCharacters: Record<string, number>;
+  /** Tool use id -> the call, until its result arrives. */
+  pendingToolUses: Record<string, PendingToolUse>;
+  /** The largest tool results, largest first. */
+  biggestResults: ToolResultSize[];
+  /** Skill name -> times called in this session. */
+  skillCounts: Record<string, number>;
+}
+
+export interface BreakdownPart {
+  kind: ContentKind;
+  /** Estimated tokens. */
+  tokens: number;
+}
+
+export interface BiggestResult {
+  tool: string;
+  target: string;
+  /** Estimated tokens. */
+  tokens: number;
+  turn: number;
+}
+
+/** The context window split into the fixed baseline (exact) and the growth since (estimated by size). */
+export interface Breakdown {
+  baselineTokens: number;
+  totalTokens: number;
+  windowSize: number;
+  /** Largest first. */
+  parts: BreakdownPart[];
+  /** Top [tool, estimated tokens] pairs of the tool results. */
+  tools: NamedAmount[];
+  biggestResults: BiggestResult[];
+}
+
+/** Day (YYYY-MM-DD, local) -> skill name -> times called. */
+export type SkillDays = Record<string, Record<string, number>>;
+
+/** How far a log file has been read for skill calls. */
+export interface SkillFileState {
+  offset: number;
+}
+
 // ---- chats ----
 
 /** One chat (session) found on disk. */
@@ -178,6 +254,8 @@ export interface RangeInsight extends TokenTotals {
   projects: NamedAmount[];
   /** Top five [model id, tokens] pairs. */
   models: NamedAmount[];
+  /** Top five [skill, times called] pairs. */
+  skills: NamedAmount[];
 }
 
 export interface Insights {
@@ -210,6 +288,10 @@ export interface PanelUsage {
   weekly?: MeterView;
   session?: { title: string; isPinned: boolean };
   costLabel?: string;
+  /** Undefined until the window size is known and the context has grown since the first response. */
+  breakdown?: Breakdown;
+  /** [skill, times called] pairs of the shown session, most used first; empty when none. */
+  skills?: NamedAmount[];
   isStale: boolean;
   isLiveOff: boolean;
   note: string;

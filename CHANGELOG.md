@@ -1,20 +1,11 @@
 # Changelog
 
-## Unreleased
+## 1.0.0
 
-- Live meters: turning them on or off is now locked, so two VS Code windows cannot overwrite your status line.
-- Live meters: `settings.json` keeps its permissions and symlink, and a quote in the home folder no longer blocks disable or uninstall.
-- Live meters: the hook copy is replaced atomically, and a clear message appears when another copy of the extension owns your status line.
-- The panel and tooltip show "Live meters are off" (click to enable) whenever the hook is not in your status line, instead of stale data.
-- Context % stays visible after a "limit reached" notice.
-- Delete refuses when two chats share a session id. The permanent fallback no longer fails on files already in the Trash.
-- Usage totals ignore replies that another session wrote into a log.
-- Documentation: new README with screenshots, contributing guide and pull request template.
-- Internal: the code base is now TypeScript. Behaviour is unchanged.
+First stable release.
 
-## 0.1.0
-
-- Status bar and Sessions panel with context, 5-hour and weekly meters.
-- Session list grouped by project: open, read, delete (Trash or permanent), new session.
-- Usage insights: tokens, heatmap, top projects, model mix, streak.
-- Live meters through the Claude Code status line, restored on disable or uninstall.
+- Status bar and Sessions panel with context, 5-hour and weekly meters (yellow above 50%, red from 80%).
+- Session manager: chats grouped by project, each with its context %. Search, open, read as a transcript, delete (to the Trash or permanently), new session.
+- Context breakdown: a full-width stacked bar under the Context meter shows what the used context is made of: the fixed baseline and what the session added (tool results, tool calls, assistant text, your messages, attachments). "Details" lists the biggest items and the skills used in that session. The split is an estimate.
+- Insights: tokens, cache hit rate, 13-week heatmap, top projects, top skills (from the logs still on disk), model mix and streak, for 7, 30 and 90 days.
+- Live meters through the Claude Code status line: asks first, locked against two windows editing at once, restored exactly on disable or uninstall. Uninstalling one of two copies leaves the other's live meters alone.

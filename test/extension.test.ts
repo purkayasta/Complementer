@@ -4,7 +4,8 @@ import assert from 'node:assert';
 import fsPromises from 'node:fs/promises';
 import Module from 'node:module';
 import path from 'node:path';
-import { createTemporaryDirectory, writeTextFile, buildAssistantLine } from './helpers';
+import { createTemporaryDirectory, writeTextFile, buildAssistantLine, buildSkillLine } from './helpers';
+import { pathExists } from '../src/utils';
 import type { PanelState } from '../src/types';
 
 const KEEPER_ID = '99999999-2222-3333-4444-555555555555';
@@ -85,7 +86,7 @@ async function createFakeHome(hasDuplicateKeeper = false): Promise<{ home: strin
   const storage = path.join(home, 'store');
   await writeTextFile(path.join(project, `${DOOMED_ID}.jsonl`), buildAssistantLine('m1', { sessionId: DOOMED_ID }) + '\n' + JSON.stringify({ type: 'ai-title', aiTitle: 'Doomed chat' }) + '\n');
   await writeTextFile(path.join(project, DOOMED_ID, 'subagents', 'agent-1.jsonl'), buildAssistantLine('m2', { isSidechain: true, sessionId: DOOMED_ID }) + '\n');
-  await writeTextFile(path.join(project, `${KEEPER_ID}.jsonl`), buildAssistantLine('m3', { sessionId: KEEPER_ID }) + '\n' + JSON.stringify({ type: 'ai-title', aiTitle: 'Keeper' }) + '\n');
+  await writeTextFile(path.join(project, `${KEEPER_ID}.jsonl`), buildAssistantLine('m3', { sessionId: KEEPER_ID }) + '\n' + buildSkillLine('code-review', { sessionId: KEEPER_ID }) + '\n' + JSON.stringify({ type: 'ai-title', aiTitle: 'Keeper' }) + '\n');
   if (hasDuplicateKeeper) await writeTextFile(path.join(claude, 'projects', '-copied-proj', `${KEEPER_ID}.jsonl`), buildAssistantLine('m3', { sessionId: KEEPER_ID }) + '\n');
   await writeTextFile(path.join(claude, 'file-history', DOOMED_ID, 'v1'));
   await writeTextFile(path.join(claude, 'file-history', KEEPER_ID, 'v1'));
@@ -250,4 +251,22 @@ test('a session id that exists in two project folders is never deleted from the 
   recorded.warningAnswers.length = 0;
   await fsPromises.access(path.join(claude, 'projects', '-fake-proj', `${KEEPER_ID}.jsonl`));
   await fsPromises.access(path.join(claude, 'projects', '-copied-proj', `${KEEPER_ID}.jsonl`));
+});
+
+test('the pinned session lists its skills, and skills.json keeps the per-day totals', async (testContext) => {
+  const { storage, postedStates, send, deactivate, dispose } = await startExtension();
+  testContext.after(dispose);
+  send({ type: 'open', id: KEEPER_ID });
+  await waitUntil(() => postedStates.at(-1)?.usage.skills?.length === 1);
+  assert.deepStrictEqual(latestState(postedStates).usage.skills, [['code-review', 1]]);
+  assert.strictEqual(latestState(postedStates).usage.breakdown, undefined); // one response: no growth, nothing to split
+  const skillsPath = path.join(storage, 'skills.json');
+  const deadline = Date.now() + 3000;
+  while (!(await pathExists(skillsPath))) {
+    if (Date.now() > deadline) throw new Error('skills.json was never written');
+    await deactivate(); // saves whatever the scan has found so far
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  const saved = JSON.parse(await fsPromises.readFile(skillsPath, 'utf8'));
+  assert.deepStrictEqual(Object.values(saved.days), [{ 'code-review': 1 }]); // the Keeper's only skill call, counted once
 });

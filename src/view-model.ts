@@ -3,8 +3,8 @@
 import path from 'node:path';
 import { pickSessions, isWithin, effectiveLimit, isStale } from './live';
 import { toDayKey } from './logs';
-import type { Account, Bucket, Chat, HistoryDays, Insights, DayInsight, LiveState, MeterView, Meters, NamedAmount, PanelState, PanelTemplateValues, RangeInsight, TokenTotals, WindowState } from './types';
-import { CHAT_INDEX_THROTTLE_MS, LARGE_LOG_BYTES, LARGE_LOG_THROTTLE_MS, INSIGHT_DAYS, INSIGHT_RANGES, TOP_PROJECTS_PER_DAY, TOP_ENTRIES_PER_RANGE } from './consts';
+import type { Account, Bucket, Breakdown, SessionTally, SkillDays, Chat, HistoryDays, Insights, DayInsight, LiveState, MeterView, Meters, NamedAmount, PanelState, PanelTemplateValues, RangeInsight, TokenTotals, WindowState } from './types';
+import { CHAT_INDEX_THROTTLE_MS, LARGE_LOG_BYTES, LARGE_LOG_THROTTLE_MS, INSIGHT_DAYS, INSIGHT_RANGES, TOP_PROJECTS_PER_DAY, TOP_ENTRIES_PER_RANGE, TOP_TOOLS, TOP_SKILLS_PER_SESSION, CONTENT_KINDS } from './consts';
 
 /**
  * How long to wait before re-indexing chats.
@@ -89,7 +89,7 @@ const totalTokensOf = (bucket: Bucket): number => bucket.inputTokens + bucket.ca
 
 /** Reducer: add an amount to the running total of its name. */
 function addToTotals(totals: Record<string, number>, [name, amount]: NamedAmount): Record<string, number> {
-  return { ...totals, [name]: (totals[name] ?? 0) + amount };
+  return { ...totals, [name]: (Object.hasOwn(totals, name) ? totals[name] : 0) + amount };
 }
 
 /** Add up values that share a name, largest first. */
@@ -97,6 +97,36 @@ function topByName(namedAmounts: NamedAmount[], limit: number): NamedAmount[] {
   return Object.entries(namedAmounts.reduce(addToTotals, {}))
     .sort((first, second) => second[1] - first[1])
     .slice(0, limit);
+}
+
+/** A session's skills, most used first. */
+export const topSessionSkills = (skillCounts: Record<string, number>): NamedAmount[] => topByName(Object.entries(skillCounts), TOP_SKILLS_PER_SESSION);
+
+/**
+ * Split the context's growth since the first response by the size of what was added. Baseline and total are measured;
+ * each part is the growth shared out by characters, so the parts add up to it exactly (an estimate, labelled as one).
+ * @returns undefined when the window size is unknown or the context has not grown (never guess)
+ */
+export function computeBreakdown(tally: SessionTally, windowSize: number | undefined): Breakdown | undefined {
+  const { baselineTokens, latestTokens } = tally;
+  const totalCharacters = CONTENT_KINDS.reduce((sum, kind) => sum + tally.characters[kind], 0);
+  if (!windowSize || baselineTokens === undefined || latestTokens === undefined || totalCharacters <= 0) return undefined;
+  const growthTokens = latestTokens - baselineTokens;
+  if (growthTokens <= 0) return undefined;
+  const tokensPerCharacter = growthTokens / totalCharacters;
+  return {
+    baselineTokens,
+    totalTokens: latestTokens,
+    windowSize,
+    parts: CONTENT_KINDS.map((kind) => ({ kind, tokens: tally.characters[kind] * tokensPerCharacter }))
+      .filter((part) => part.tokens > 0)
+      .sort((first, second) => second.tokens - first.tokens),
+    tools: topByName(
+      Object.entries(tally.toolCharacters).map(([tool, characters]): NamedAmount => [tool, characters * tokensPerCharacter]),
+      TOP_TOOLS,
+    ),
+    biggestResults: tally.biggestResults.map(({ tool, target, characters, turn }) => ({ tool, target, tokens: characters * tokensPerCharacter, turn })),
+  };
 }
 
 /** The last `count` local days, oldest first. */
@@ -121,7 +151,7 @@ function sumTokens(rows: { bucket: Bucket }[], key: keyof TokenTotals): number {
   return rows.reduce((sum, row) => sum + row.bucket[key], 0);
 }
 
-function summariseRange(dates: string[], historyDays: HistoryDays): RangeInsight {
+function summariseRange(dates: string[], historyDays: HistoryDays, skillDays: SkillDays): RangeInsight {
   const rows = dates.flatMap((date) =>
     Object.entries(historyDays[date] ?? {}).flatMap(([workingDirectory, byModel]) => Object.entries(byModel).map(([modelId, bucket]) => ({ project: projectName(workingDirectory), modelId, bucket }))),
   );
@@ -133,6 +163,7 @@ function summariseRange(dates: string[], historyDays: HistoryDays): RangeInsight
     activeDays: dates.filter((date) => historyDays[date]).length,
     projects: topByName(rows.map((row): NamedAmount => [row.project, totalTokensOf(row.bucket)]), TOP_ENTRIES_PER_RANGE),
     models: topByName(rows.map((row): NamedAmount => [row.modelId, totalTokensOf(row.bucket)]), TOP_ENTRIES_PER_RANGE),
+    skills: topByName(dates.flatMap((date) => Object.entries(skillDays[date] ?? {})), TOP_ENTRIES_PER_RANGE),
   };
 }
 
@@ -148,13 +179,13 @@ function countStreak(days: DayInsight[]): number {
 }
 
 /** Daily totals for the last 90 days plus 7/30/90-day rollups (by project and model). */
-export function computeInsights(historyDays: HistoryDays, now: Date): Insights {
+export function computeInsights(historyDays: HistoryDays, now: Date, skillDays: SkillDays = {}): Insights {
   const dates = lastDayKeys(now, INSIGHT_DAYS);
   const days = dates.map((date) => summariseDay(date, historyDays[date]));
   const busiest = days.reduce((best, day) => (day.totalTokens > best.totalTokens ? day : best), days[0]);
   return {
     days,
-    ranges: Object.fromEntries(INSIGHT_RANGES.map((count) => [count, summariseRange(dates.slice(-count), historyDays)])),
+    ranges: Object.fromEntries(INSIGHT_RANGES.map((count) => [count, summariseRange(dates.slice(-count), historyDays, skillDays)])),
     streakDays: countStreak(days),
     busiestDay: busiest.totalTokens ? { date: busiest.date, totalTokens: busiest.totalTokens } : undefined,
   };
@@ -176,7 +207,7 @@ function statusNote(meters: Meters, hasLiveFeed: boolean): string {
 }
 
 /** Everything the Sessions panel draws. */
-export function buildPanelState({ meters, account, liveStates, isLiveEnabled, chats, workspaceFolders, windowSizes, insights, selectedSessionId, nowMs }: {
+export function buildPanelState({ meters, account, liveStates, isLiveEnabled, chats, workspaceFolders, windowSizes, insights, selectedSessionId, nowMs, breakdown, sessionSkills = [] }: {
   meters: Meters;
   account: Account | undefined;
   liveStates: LiveState[];
@@ -188,6 +219,9 @@ export function buildPanelState({ meters, account, liveStates, isLiveEnabled, ch
   insights: Insights;
   selectedSessionId: string | undefined;
   nowMs: number;
+  breakdown?: Breakdown;
+  /** [skill, times called] pairs of the shown session, most used first. */
+  sessionSkills?: NamedAmount[];
 }): PanelState {
   const liveBySessionId = new Map(liveStates.map((state) => [state.sessionId, state]));
   const panelChats = chats
@@ -212,6 +246,8 @@ export function buildPanelState({ meters, account, liveStates, isLiveEnabled, ch
       weekly: toLimitView(meters.weekly, meters.limitsSession?.weeklyLimit?.resetsAt, nowMs),
       session: meters.chat ? { title: meters.chat.title, isPinned: Boolean(selectedSessionId) } : undefined,
       costLabel: meters.liveSession?.costUsd === undefined ? undefined : formatUsd(meters.liveSession.costUsd),
+      breakdown,
+      skills: sessionSkills.length ? sessionSkills : undefined,
       isStale: meters.isStale,
       isLiveOff: !hasLiveFeed,
       note: statusNote(meters, hasLiveFeed),

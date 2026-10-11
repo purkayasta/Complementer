@@ -8,6 +8,9 @@ type MeterView = import('../types').MeterView;
 type Insights = import('../types').Insights;
 type RangeInsight = import('../types').RangeInsight;
 type DayInsight = import('../types').DayInsight;
+type Breakdown = import('../types').Breakdown;
+type ContentKind = import('../types').ContentKind;
+type NamedAmount = import('../types').NamedAmount;
 
 /** What the user picked in this panel. The first three survive the panel being hidden. */
 interface ViewState {
@@ -16,6 +19,8 @@ interface ViewState {
   showOnlyActive: boolean;
   /** Days: 7, 30 or 90. */
   insightRange: number;
+  /** Whether the context Details under the Context meter are open. */
+  areDetailsOpen: boolean;
   /** Project group name -> expanded, for groups the user opened or closed. */
   groupToggles: Record<string, boolean>;
   searchText: string;
@@ -41,6 +46,10 @@ const MODEL_COLORS = ['#00b8ff', '#2979ff', '#6e5aff', '#00e5c7', '#b388ff', '#f
 const HEATMAP_OPACITIES = [0, 0.28, 0.5, 0.75, 1];
 const HEATMAP_LEVELS = 4;
 const UNGROUPED_LABEL = 'Ungrouped';
+const BASELINE_COLOR = '#6b7280';
+const KIND_COLORS: Record<ContentKind, string> = { toolResults: '#f59e0b', toolCalls: '#fb7185', assistantText: '#2979ff', assistantThinking: '#06b6d4', userText: '#a78bfa', attachments: '#34d399' };
+const KIND_LABELS: Record<ContentKind, string> = { toolResults: 'Tool results', toolCalls: 'Tool calls', assistantText: 'Assistant text', assistantThinking: 'Thinking', userText: 'Your messages', attachments: 'Attachments' };
+const LEGEND_PARTS = 3;
 
 const vscode = acquireVsCodeApi();
 
@@ -50,6 +59,7 @@ function createViewState(savedState: Partial<ViewState> | undefined): ViewState 
     projectFilter: savedState?.projectFilter ?? '',
     showOnlyActive: Boolean(savedState?.showOnlyActive),
     insightRange: savedState?.insightRange ?? 30,
+    areDetailsOpen: Boolean(savedState?.areDetailsOpen),
     groupToggles: savedState?.groupToggles ?? {},
     searchText: '',
     selectedDay: '',
@@ -112,7 +122,7 @@ function buildElement(tagName: string, attributes: ElementAttributes = {}, ...ch
 }
 
 function saveViewState() {
-  vscode.setState({ projectFilter: viewState.projectFilter, showOnlyActive: viewState.showOnlyActive, insightRange: viewState.insightRange, groupToggles: viewState.groupToggles });
+  vscode.setState({ projectFilter: viewState.projectFilter, showOnlyActive: viewState.showOnlyActive, insightRange: viewState.insightRange, areDetailsOpen: viewState.areDetailsOpen, groupToggles: viewState.groupToggles });
 }
 
 function formatTokens(tokens: number) {
@@ -174,10 +184,14 @@ function renderMeter(label: string, meter: MeterView, normalColor: string) {
 }
 
 function renderUsage(usage: PanelState['usage']) {
+  const contextMeter = usage.context && renderMeter('Context', usage.context, 'var(--vscode-charts-blue)');
+  const contextDetails = renderContextDetails(usage);
+  if (contextMeter) contextMeter.append(...contextDetails);
   const meters = [
-    usage.context && renderMeter('Context', usage.context, 'var(--vscode-charts-blue)'),
+    contextMeter,
     usage.fiveHour && renderMeter('Session (5hr)', usage.fiveHour, 'var(--vscode-charts-orange)'),
     usage.weekly && renderMeter('Weekly (7 day)', usage.weekly, 'var(--vscode-charts-purple)'),
+    ...(contextMeter ? [] : contextDetails), // no context meter to sit under: the skills list still shows
     usage.costLabel ? buildElement('div', { className: 'muted' }, 'Session cost ' + usage.costLabel) : null,
   ];
   elements.meters.replaceChildren(...meters.filter(isElement));
@@ -190,6 +204,80 @@ function renderUsage(usage: PanelState['usage']) {
 function sessionLineContent(session: { title: string; isPinned: boolean }) {
   const text = (session.isPinned ? 'Pinned: ' : 'Following: ') + session.title + '  ';
   return session.isPinned ? [text, buildElement('button', { className: 'link-button', onClick: () => vscode.postMessage({ type: 'select', id: null }) }, 'Follow latest')] : [text];
+}
+
+/** A name with a value on the right and a bar under it. @param fraction 0-1, the bar's length. */
+function renderBarRow(name: string, valueLabel: string, fraction: number) {
+  return buildElement(
+    'div',
+    { className: 'bar-row', title: name },
+    buildElement('div', { className: 'bar-row-header' }, buildElement('span', {}, name), buildElement('span', {}, valueLabel)),
+    buildElement('div', { className: 'bar-row-track' }, buildElement('div', { className: 'bar-row-fill', style: { width: `${fraction * 100}%` } })),
+  );
+}
+
+/** @param skills Most used first. */
+function renderSkillRows(skills: NamedAmount[]) {
+  return skills.map(([name, uses]) => renderBarRow(name, `×${uses}`, uses / skills[0][1]));
+}
+
+/** One full-width stacked bar of what the used context is made of (the Context meter above shows how full it is), and a one-line legend of the biggest parts. */
+function renderBreakdownBar(breakdown: Breakdown) {
+  const share = (tokens: number) => `${(tokens / breakdown.totalTokens) * 100}%`;
+  const segments = [
+    buildElement('div', { className: 'breakdown-segment', title: `Baseline ${formatTokens(breakdown.baselineTokens)}`, style: { width: share(breakdown.baselineTokens), background: BASELINE_COLOR } }),
+    ...breakdown.parts.map((part) => buildElement('div', { className: 'breakdown-segment', title: `${KIND_LABELS[part.kind]} ~${formatTokens(part.tokens)}`, style: { width: share(part.tokens), background: KIND_COLORS[part.kind] } })),
+  ];
+  const legend = [`Baseline ${formatTokens(breakdown.baselineTokens)}`, ...breakdown.parts.slice(0, LEGEND_PARTS).map((part) => `${KIND_LABELS[part.kind]} ~${formatTokens(part.tokens)}`)].join(' · ');
+  return [buildElement('div', { className: 'breakdown-stack' }, ...segments), buildElement('div', { className: 'muted breakdown-legend' }, legend)];
+}
+
+function renderBreakdownRows(breakdown: Breakdown) {
+  const buildRow = (label: string, tokens: number, color: string, isEstimate: boolean, isSub = false) =>
+    buildElement('div', { className: 'legend-row' + (isSub ? ' is-sub' : ''), style: { '--swatch-color': color } }, buildElement('span', {}, label), buildElement('span', {}, (isEstimate ? '~' : '') + formatTokens(tokens)));
+  return [
+    buildRow('Baseline (fixed)', breakdown.baselineTokens, BASELINE_COLOR, false),
+    ...breakdown.parts.flatMap((part) => [buildRow(KIND_LABELS[part.kind], part.tokens, KIND_COLORS[part.kind], true), ...(part.kind === 'toolResults' ? breakdown.tools.map(([tool, tokens]) => buildRow(tool, tokens, KIND_COLORS.toolResults, true, true)) : [])]),
+  ];
+}
+
+function renderBiggestResults(breakdown: Breakdown) {
+  if (!breakdown.biggestResults.length) return [];
+  const rows = breakdown.biggestResults.map((result) =>
+    buildElement(
+      'div',
+      { className: 'biggest-row', title: result.target },
+      buildElement('div', { className: 'biggest-row-header' }, buildElement('span', {}, result.target ? `${result.tool} · ${result.target}` : result.tool), buildElement('span', {}, `~${formatTokens(result.tokens)}`)),
+      buildElement('div', { className: 'muted' }, `turn ${result.turn}`),
+    ),
+  );
+  return [buildElement('div', { className: 'subheading' }, 'Biggest items'), ...rows];
+}
+
+/** The bar, then a "Details" toggle (closed by default) that opens the parts, the biggest items and the skills used. */
+function renderContextDetails(usage: PanelState['usage']) {
+  const { breakdown, skills = [] } = usage;
+  if (!breakdown && !skills.length) return [];
+  const toggle = buildElement(
+    'button',
+    {
+      className: 'link-button details-toggle',
+      onClick: () => {
+        viewState.areDetailsOpen = !viewState.areDetailsOpen;
+        saveViewState();
+        renderUsage(usage);
+      },
+    },
+    `${viewState.areDetailsOpen ? '▾' : '▸'} Details`,
+  );
+  const details = buildElement(
+    'div',
+    { className: 'details' },
+    ...(breakdown ? [...renderBreakdownRows(breakdown), ...renderBiggestResults(breakdown)] : []),
+    ...(skills.length ? [buildElement('div', { className: 'subheading' }, 'Skills used'), ...renderSkillRows(skills)] : []),
+    breakdown ? buildElement('div', { className: 'estimate-note' }, 'Baseline and total are exact. The split is an estimate.') : null,
+  );
+  return [...(breakdown ? renderBreakdownBar(breakdown) : []), toggle, ...(viewState.areDetailsOpen ? [details] : [])];
 }
 
 // ---- chat list ----
@@ -346,14 +434,7 @@ function renderHeatmap(days: DayInsight[]) {
 function renderTopProjects(range: RangeInsight, totalTokens: number) {
   if (!range.projects.length) return [];
   const largest = range.projects[0][1];
-  const rows = range.projects.map(([name, tokens]) =>
-    buildElement(
-      'div',
-      { className: 'bar-row', title: name },
-      buildElement('div', { className: 'bar-row-header' }, buildElement('span', {}, name), buildElement('span', {}, `${formatTokens(tokens)} · ${Math.round((tokens / totalTokens) * 100)}%`)),
-      buildElement('div', { className: 'bar-row-track' }, buildElement('div', { className: 'bar-row-fill', style: { width: `${(tokens / largest) * 100}%` } })),
-    ),
-  );
+  const rows = range.projects.map(([name, tokens]) => renderBarRow(name, `${formatTokens(tokens)} · ${Math.round((tokens / totalTokens) * 100)}%`, tokens / largest));
   return [buildElement('div', { className: 'subheading' }, 'Top projects'), ...rows];
 }
 
@@ -368,6 +449,11 @@ function renderModelMix(range: RangeInsight, totalTokens: number) {
     buildElement('div', { className: 'legend-row', style: { '--swatch-color': modelColor(index) } }, buildElement('span', {}, modelId.replace(/^claude-/, '')), buildElement('span', {}, Math.round((tokens / totalTokens) * 100) + '%')),
   );
   return [buildElement('div', { className: 'subheading' }, 'Models'), stack, ...legend];
+}
+
+function renderTopSkills(range: RangeInsight) {
+  if (!range.skills.length) return [];
+  return [buildElement('div', { className: 'subheading' }, 'Top skills'), ...renderSkillRows(range.skills), buildElement('div', { className: 'muted skills-note' }, 'From logs still on this computer. Counts uses, not tokens.')];
 }
 
 function renderInsightsFooter(insights: Insights) {
@@ -403,7 +489,7 @@ function renderInsights() {
   }
   const range = insights.ranges[viewState.insightRange];
   const totalTokens = range.inputTokens + range.cacheCreationTokens + range.cacheReadTokens + range.outputTokens;
-  elements.insightsBody.replaceChildren(renderTiles(range), ...renderHeatmap(insights.days), ...renderTopProjects(range, totalTokens), ...renderModelMix(range, totalTokens), ...renderInsightsFooter(insights));
+  elements.insightsBody.replaceChildren(renderTiles(range), ...renderHeatmap(insights.days), ...renderTopProjects(range, totalTokens), ...renderModelMix(range, totalTokens), ...renderTopSkills(range), ...renderInsightsFooter(insights));
 }
 
 // ---- wiring ----

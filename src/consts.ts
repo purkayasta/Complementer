@@ -1,7 +1,7 @@
 // Every module-level constant of the extension, in one place. (hook.ts and views/panel.ts keep their own: the first is
 // copied on its own into the user's storage folder and the second runs in the browser, so neither can import this file.)
 import path from 'node:path';
-import type { TokenTotals } from './types';
+import type { ContentKind, TokenTotals } from './types';
 
 // ---- Session logs ----
 
@@ -10,6 +10,19 @@ export const TOKEN_KEYS = (['inputTokens', 'cacheCreationTokens', 'cacheReadToke
 export const HISTORY_VERSION = 2;
 export const READ_CHUNK_BYTES = 1 << 20;
 export const NEWLINE_BYTE = 10;
+
+// ---- Breakdown and skills ----
+
+export const SKILL_CALL_NEEDLE = Buffer.from('"name":"Skill"');
+export const ATTACHMENT_NEEDLE = Buffer.from('"type":"attachment"');
+export const SKILLS_VERSION = 1;
+export const NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_.:-]{0,99}$/; // tool and skill names from logs: no markup, and never "__proto__"
+export const TARGET_FIELDS = ['file_path', 'path', 'command', 'pattern', 'url', 'query', 'skill'];
+export const TARGET_MAX_LENGTH = 80;
+export const TOP_BIGGEST_RESULTS = 5;
+export const TOP_TOOLS = 5;
+export const TOP_SKILLS_PER_SESSION = 5;
+export const CONTENT_KINDS = ['toolResults', 'toolCalls', 'assistantText', 'assistantThinking', 'userText', 'attachments'] as const satisfies ContentKind[];
 
 // ---- Chat index ----
 

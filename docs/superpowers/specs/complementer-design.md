@@ -1,6 +1,6 @@
 # Complementer: Design (as built)
 
-VS Code extension that complements the official Claude Code extension. Independent project, not affiliated with Anthropic. TypeScript (strict), compiled with `tsc` to `out/` (CommonJS); no bundler, no runtime dependencies. This document describes what exists; `../plans/roadmap-v1-v2-v3.md` says what comes next, and `/CLAUDE.md` holds the working conventions.
+VS Code extension that complements the official Claude Code extension. Independent project, not affiliated with Anthropic. TypeScript (strict), compiled with `tsc` to `out/` (CommonJS); no bundler, no runtime dependencies. This document describes what exists; `../plans/roadmap-v1-v2.md` lists the v1 and v2 milestones (released together as 1.0.0) and what is left before publishing, and `/CLAUDE.md` holds the working conventions.
 
 ## Goal
 
@@ -62,6 +62,8 @@ Logs do not contain it; live payloads do. The extension records `model id -> win
 src/extension.ts        class ComplementerExtension: status bar, panel provider, commands, watchers, timers
 src/view-model.ts       pure functions: computeMeters, computeInsights, buildPanelState, formatters (unit-tested)
 src/logs.ts             parseUsageLine, iterateLineBatches, readNewRecords, History, Scanner, listLogFiles
+src/breakdown.ts        createSessionTally, addEntry, readSessionTally: sizes of what fills the shown session's context (in memory, names and sizes only)
+src/skills.ts           parseSkillUses, SkillHistory: per-day skill call counts in skills.json (own file and offsets)
 src/chats.ts            ChatIndex, renderTranscript, getSessionPaths
 src/live.ts             parsePayload, pickSessions, isWithin, effectiveLimit, LiveFeed, parseAccount, readAccount
 src/setup.ts            planEnable, enableStatusLine, disableStatusLine
@@ -106,7 +108,7 @@ If the Trash is unavailable it asks before deleting permanently. A separate ✕ 
 - `hook.sh` extracts `session_id` with shell builtins only (about two process spawns on the hot path), runs the original command with `eval` in the same shell, writes the payload atomically, and only accepts ids of `[A-Za-z0-9_-]`.
 - `hook.js` (Windows) does the same in Node, fully async. `enable` refuses if `node` is not on `PATH`, so a missing runtime cannot break the user's status line.
 - **Disable** restores the saved value exactly, or deletes the key if there was none. If the backup file is missing or unreadable, it falls back to `original-command`.
-- **Uninstall:** `package.json` has a `vscode:uninstall` script (`src/uninstall.ts`) that finds this extension's hook in `settings.json` and runs the same restore, so the user's status line is not left chained through a hook nobody maintains.
+- **Uninstall:** `package.json` has a `vscode:uninstall` script (`src/uninstall.ts`) that finds this extension's hook in `settings.json` and runs the same restore (only when the hook's storage folder is named after this extension's own `publisher.name`; another install's hook is left alone), so the user's status line is not left chained through a hook nobody maintains.
 - A payload older than 10 minutes is shown greyed and stale; a window whose `resets_at` has passed shows as reset.
 
 ## Webview

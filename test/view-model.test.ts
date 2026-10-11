@@ -6,6 +6,7 @@ import vm from 'node:vm';
 import type { Chat, LiveState } from '../src/types';
 import * as viewModel from '../src/view-model';
 import { LARGE_LOG_BYTES } from '../src/consts';
+import { createSessionTally } from '../src/breakdown';
 
 const NOW_MS = Date.parse('2026-10-11T12:00:00');
 const WINDOW_SIZES = { 'claude-sonnet-5-5': 1000000 };
@@ -159,4 +160,66 @@ test('buildPanelState: live meters read as off when the hook is not in statusLin
   assert.match(build(false).note, /Live meters are off/);
   assert.strictEqual(build(true).isLiveOff, false);
   assert.strictEqual(build(undefined).isLiveOff, false); // unknown: the live files decide
+});
+
+test('computeBreakdown: parts add up to the growth, tools and biggest items are scaled the same way, unknowns show nothing', () => {
+  const tally = createSessionTally();
+  Object.assign(tally, { baselineTokens: 1000, latestTokens: 1600 });
+  tally.characters.toolResults = 300;
+  tally.characters.assistantText = 100;
+  tally.toolCharacters = { Read: 200, Bash: 100 };
+  tally.biggestResults = [{ tool: 'Read', target: 'a.ts', characters: 200, turn: 3 }];
+  const breakdown = viewModel.computeBreakdown(tally, 10000);
+  assert.ok(breakdown);
+  assert.deepStrictEqual(breakdown.parts, [{ kind: 'toolResults', tokens: 450 }, { kind: 'assistantText', tokens: 150 }]); // 600 tokens over 400 characters
+  assert.deepStrictEqual(breakdown.tools, [['Read', 300], ['Bash', 150]]);
+  assert.deepStrictEqual(breakdown.biggestResults, [{ tool: 'Read', target: 'a.ts', tokens: 300, turn: 3 }]);
+  assert.deepStrictEqual([breakdown.baselineTokens, breakdown.totalTokens, breakdown.windowSize], [1000, 1600, 10000]);
+  assert.strictEqual(viewModel.computeBreakdown(tally, undefined), undefined); // window size unknown: never guess
+  assert.strictEqual(viewModel.computeBreakdown({ ...tally, latestTokens: 900 }, 10000), undefined); // context shrank (compaction): no honest split
+  assert.strictEqual(viewModel.computeBreakdown({ ...tally, latestTokens: 1000 }, 10000), undefined); // no growth yet
+  assert.strictEqual(viewModel.computeBreakdown(createSessionTally(), 10000), undefined); // nothing read
+});
+
+test('topSessionSkills: most used first, at most five', () => {
+  const counts = { alpha: 1, beta: 7, gamma: 3, delta: 2, epsilon: 5, zeta: 4 };
+  assert.deepStrictEqual(viewModel.topSessionSkills(counts), [['beta', 7], ['epsilon', 5], ['zeta', 4], ['gamma', 3], ['delta', 2]]);
+  assert.deepStrictEqual(viewModel.topSessionSkills({}), []);
+});
+
+test('computeInsights: top skills follow the range and add up across days', () => {
+  const skillDays = { '2026-10-11': { 'code-review': 3, brainstorming: 1 }, '2026-10-05': { brainstorming: 1 }, '2026-09-01': { 'code-review': 10 } };
+  const insights = viewModel.computeInsights({}, new Date('2026-10-11T12:00:00'), skillDays);
+  assert.deepStrictEqual(insights.ranges[7].skills, [['code-review', 3], ['brainstorming', 2]]);
+  assert.deepStrictEqual(insights.ranges[30].skills[0], ['code-review', 3]); // 1 September is 40 days back
+  assert.deepStrictEqual(insights.ranges[90].skills[0], ['code-review', 13]);
+  assert.deepStrictEqual(viewModel.computeInsights({}, new Date('2026-10-11T12:00:00')).ranges[7].skills, []); // no skill file yet
+});
+
+test('buildPanelState: the breakdown and the session skills ride along in usage, and are absent when empty', () => {
+  const build = (extra: object) =>
+    viewModel.buildPanelState({
+      meters: viewModel.computeMeters({ ...baseInputs, chats: [chat('a')], liveStates: [liveState('a')] }),
+      account: undefined,
+      liveStates: [liveState('a')],
+      isLiveEnabled: true,
+      chats: [chat('a')],
+      workspaceFolders: ['/work/app'],
+      windowSizes: WINDOW_SIZES,
+      insights: viewModel.computeInsights({}, new Date(NOW_MS)),
+      selectedSessionId: undefined,
+      nowMs: NOW_MS,
+      ...extra,
+    }).usage;
+  const breakdown = { baselineTokens: 1, totalTokens: 2, windowSize: 10, parts: [], tools: [], biggestResults: [] };
+  assert.strictEqual(build({ breakdown, sessionSkills: [['code-review', 2]] }).breakdown, breakdown);
+  assert.deepStrictEqual(build({ breakdown, sessionSkills: [['code-review', 2]] }).skills, [['code-review', 2]]);
+  assert.strictEqual(build({}).breakdown, undefined);
+  assert.strictEqual(build({ sessionSkills: [] }).skills, undefined); // nothing to list: the panel hides the section
+});
+
+test('names that match object internals (constructor, toString) are counted like any other', () => {
+  assert.deepStrictEqual(viewModel.topSessionSkills({ constructor: 2, toString: 1 }), [['constructor', 2], ['toString', 1]]);
+  const insights = viewModel.computeInsights({}, new Date('2026-10-11T12:00:00'), { '2026-10-11': { constructor: 3 }, '2026-10-10': { constructor: 1 } });
+  assert.deepStrictEqual(insights.ranges[7].skills, [['constructor', 4]]);
 });

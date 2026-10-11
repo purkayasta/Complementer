@@ -6,13 +6,13 @@ Guidance for Claude Code when working in this repository.
 
 Complementer is a VS Code extension that complements the official Claude Code extension: context and plan-limit meters (status bar and a Sessions panel), a session manager (new session, open, read, delete), and usage insights. Independent project, not affiliated with Anthropic. TypeScript (strict), compiled with `tsc` to `out/` (CommonJS); no bundler and no runtime dependencies.
 
-Specs and roadmap: `docs/superpowers/specs/complementer-design.md` (what is built and why) and `docs/superpowers/plans/roadmap-v1-v2-v3.md` (what is next). Read the spec before changing behaviour.
+Specs and roadmap: `docs/superpowers/specs/complementer-design.md` (what is built and why) and `docs/superpowers/plans/roadmap-v1-v2.md` (v1 and v2 milestones, released together as 1.0.0; what is left before publishing). Read the spec before changing behaviour.
 
 ## Commands
 
 ```
 npm run build   # clean, tsc (src + test), tsc (webview script), copy hook.sh / panel.html / panel.css into out/
-npm test        # builds, then node:test on out/test, 69 tests; must pass
+npm test        # builds, then node:test on out/test, 87 tests; must pass
 npm run lint    # ESLint (also enforces naming and const/let)
 npm run check   # tsc --noEmit over two projects: src + test, and src/views/panel.ts (the webview script, with DOM types)
 npm run package # runs lint + check + tests, then builds (`out/` is git-ignored; the .vsix ships `out/src` only) release/complementer-<version>.vsix
@@ -28,6 +28,8 @@ src/types.ts            Every shared interface and type alias (types only). Othe
 src/consts.ts           Every module-level constant (hook.ts and views/panel.ts keep their own: they run standalone)
 src/view-model.ts       Pure functions: which session is shown, meters, insights, panel state, formatters. No vscode, no I/O.
 src/logs.ts             parseUsageLine, iterateLineBatches, readNewRecords, History (totals + offsets, one atomic file), Scanner
+src/breakdown.ts        createSessionTally, addEntry, readSessionTally: sizes of what fills the shown session's context (in memory, names and sizes only)
+src/skills.ts           parseSkillUses, SkillHistory: per-day skill call counts in skills.json (own file and offsets)
 src/chats.ts            ChatIndex, renderTranscript, getSessionPaths (everything Claude keeps per session)
 src/live.ts             parsePayload, pickSessions, isWithin, effectiveLimit, LiveFeed; also parseAccount / readAccount from ~/.claude.json (display fields only) (watches live/<sessionId>.json)
 src/setup.ts            planEnable / enableStatusLine / disableStatusLine: chains the user's statusLine through the hook
@@ -57,6 +59,8 @@ test/                   *.test.ts plus helpers.ts; extension.test.ts runs the re
 - Token totals are anonymous aggregates and are kept when a session is deleted. Chat content is never stored.
 - `claude-vscode.newConversation` only pings an already-open chat; use `claude-vscode.primaryEditor.open` (optionally with a session id).
 - `getSessionPaths` is the only place that decides what a delete touches; it refuses anything that is not a UUID-named log inside `~/.claude/projects`. Delete moves to the Trash by default (`useTrash: true`); the row's ✕ button deletes for good (`useTrash: false`) behind its own confirmation, and one answer never confirms the other. Both go through `getSessionPaths`.
+- Skills are counted from assistant `tool_use` blocks named `Skill` only. Typed `/name` commands cannot be told from built-ins (`/clear`, `/model`), so they are not counted. Names from logs pass `NAME_PATTERN` before they are counted or shown.
+- The context breakdown measures sizes in characters and scales them to the measured growth in tokens since the first response: baseline and total are exact, the split is an estimate. No compaction marker has been seen in a real log, so compaction is detected by the context shrinking below the last response: the sizes are then dropped and the baseline restarts (skills and turns are kept).
 
 ## Don't
 

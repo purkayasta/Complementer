@@ -131,13 +131,18 @@ test('the uninstall script puts the user\'s status line back, and leaves a forei
   const original = { statusLine: { type: 'command', command: 'echo hi' }, other: 1 };
   await writeTextFile(paths.settingsPath, JSON.stringify(original));
   await setup.enableStatusLine(paths);
-  await main(home);
+  const ours = await readSettingsFile(paths.settingsPath);
+  await main(home, 'other.complementer'); // another install is being removed: this one's hook stays
+  assert.deepStrictEqual(await readSettingsFile(paths.settingsPath), ours);
+  await main(home, undefined); // falls back to the id in package.json, which is not me.complementer: still not ours
+  assert.deepStrictEqual(await readSettingsFile(paths.settingsPath), ours);
+  await main(home, 'Me.Complementer');
   assert.deepStrictEqual(await readSettingsFile(paths.settingsPath), original);
   const foreign = { statusLine: { type: 'command', command: 'bash /x/mine.sh' } };
   await writeTextFile(paths.settingsPath, JSON.stringify(foreign));
-  await main(home);
+  await main(home, 'me.complementer');
   assert.deepStrictEqual(await readSettingsFile(paths.settingsPath), foreign);
-  await main(path.join(home, 'no-such-home')); // no settings file: must not throw
+  await main(path.join(home, 'no-such-home'), 'me.complementer'); // no settings file: must not throw
 });
 
 test('refuses to wrap another copy of the hook, so the user\'s real status line is never lost', async () => {
@@ -165,7 +170,7 @@ test('a quote and a space in the storage path do not stop enable, disable, unins
   await setup.enableStatusLine(paths);
   await fsPromises.mkdir(path.join(home, '.claude'), { recursive: true });
   await fsPromises.rename(paths.settingsPath, path.join(home, '.claude', 'settings.json')); // the uninstall script reads <home>/.claude/settings.json
-  await main(home);
+  await main(home, 'pub.complementer');
   assert.deepStrictEqual(await readSettingsFile(path.join(home, '.claude', 'settings.json')), restored);
 });
 

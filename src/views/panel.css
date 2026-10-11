@@ -471,3 +471,69 @@ ul {
   cursor: pointer;
   text-decoration: underline;
 }
+
+/* Context breakdown */
+.breakdown-stack {
+  display: flex;
+  height: 10px;
+  border-radius: 4px;
+  overflow: hidden;
+  margin-top: 8px;
+}
+
+.breakdown-segment {
+  height: 100%;
+}
+
+.breakdown-legend {
+  margin-top: 4px;
+}
+
+.details-toggle {
+  margin-top: 4px;
+}
+
+.details {
+  margin-top: 6px;
+}
+
+.legend-row.is-sub {
+  padding-left: 14px;
+  font-size: 11px;
+  opacity: 0.8;
+}
+
+.legend-row.is-sub > :first-child::before {
+  display: none;
+}
+
+.biggest-row {
+  font-size: 12px;
+  margin: 4px 0;
+  padding-top: 3px;
+  border-top: 1px solid var(--border);
+}
+
+.biggest-row-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.biggest-row-header > :first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.estimate-note {
+  font-size: 11px;
+  font-style: italic;
+  opacity: 0.7;
+  margin-top: 6px;
+}
+
+.skills-note {
+  font-size: 11px;
+  margin-top: 4px;
+}

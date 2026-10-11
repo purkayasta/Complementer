@@ -65,3 +65,8 @@ export const toFiniteNumber = (value: unknown) => (typeof value === 'number' && 
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
+/** Add to a named counter. The own-property check keeps names like "constructor" from reading the prototype. */
+export function incrementCount(counts: Record<string, number>, name: string, amount = 1) {
+  counts[name] = (Object.hasOwn(counts, name) ? counts[name] : 0) + amount;
+}

@@ -232,7 +232,7 @@ async function listJsonlFiles(directory: string): Promise<string[]> {
 }
 
 /** The session a log belongs to: its file name, or for a subagent log the session folder two levels up. */
-function getOwnSessionId(filePath: string): string {
+export function getOwnSessionId(filePath: string): string {
   const isSubagentLog = path.basename(path.dirname(filePath)) === 'subagents';
   return isSubagentLog ? path.basename(path.dirname(path.dirname(filePath))) : path.basename(filePath, '.jsonl');
 }
