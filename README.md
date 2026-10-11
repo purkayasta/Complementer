@@ -4,12 +4,10 @@ Shows what Claude Code does not: how full your context is, how much of your 5-ho
 
 Independent project, not affiliated with Anthropic.
 
-[![Version](https://img.shields.io/visual-studio-marketplace/v/pritompurkayasta.complementer?label=marketplace)](https://marketplace.visualstudio.com/items?itemName=pritompurkayasta.complementer)
-[![Installs](https://img.shields.io/visual-studio-marketplace/i/pritompurkayasta.complementer)](https://marketplace.visualstudio.com/items?itemName=pritompurkayasta.complementer)
-[![Downloads](https://img.shields.io/visual-studio-marketplace/d/pritompurkayasta.complementer)](https://marketplace.visualstudio.com/items?itemName=pritompurkayasta.complementer)
-[![Rating](https://img.shields.io/visual-studio-marketplace/r/pritompurkayasta.complementer)](https://marketplace.visualstudio.com/items?itemName=pritompurkayasta.complementer&ssr=false#review-details)
+[![VS Code Marketplace](https://img.shields.io/badge/VS_Code-Marketplace-007ACC?logo=visualstudiocode)](https://marketplace.visualstudio.com/items?itemName=pritompurkayasta.complementer)
+[![Version](https://img.shields.io/github/package-json/v/purkayasta/complementer)](https://github.com/purkayasta/complementer/blob/main/package.json)
 [![CI](https://github.com/purkayasta/complementer/actions/workflows/ci.yml/badge.svg)](https://github.com/purkayasta/complementer/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/github/license/purkayasta/complementer)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 <p align="center">
   <img src="media/usage.png" alt="5-hour and weekly usage meters with reset countdowns, above the New session button" width="340">
