@@ -1,0 +1,473 @@
+/* Sessions panel. Colours come from the VS Code theme; the neon blue accent is our own. */
+:root {
+  --accent-start: #2979ff;
+  --accent-end: #00b8ff;
+  --accent-text: #4cc9ff;
+  --border: var(--vscode-widget-border, rgba(136, 136, 136, 0.27));
+}
+
+body {
+  margin: 0;
+  padding: 0 0 16px;
+  font: 13px var(--vscode-font-family);
+  color: var(--vscode-foreground);
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  padding: 0;
+}
+
+ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+.section {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.last-section {
+  border-bottom: 0;
+}
+
+.section-title {
+  margin: 0 0 10px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  opacity: 0.7;
+  text-transform: uppercase;
+}
+
+.muted {
+  opacity: 0.6;
+  font-size: 12px;
+}
+
+.stale {
+  opacity: 0.5;
+}
+
+.session-line {
+  margin: -4px 0 10px;
+}
+
+.link-button {
+  text-decoration: underline;
+  opacity: 0.9;
+}
+
+/* Account */
+.key-value {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.key-value > :first-child {
+  opacity: 0.7;
+  flex: none;
+}
+
+.key-value > :last-child {
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* Usage meters */
+.meter {
+  margin-bottom: 12px;
+}
+
+.meter:last-child {
+  margin-bottom: 0;
+}
+
+.meter-header {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.meter-label-warning {
+  font-weight: 600;
+}
+
+.meter-track {
+  height: 6px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--vscode-foreground) 18%, transparent);
+  overflow: hidden;
+}
+
+.meter-fill {
+  height: 100%;
+  background: var(--bar-color);
+  transition: width 0.3s;
+}
+
+.meter-caption {
+  margin-top: 3px;
+}
+
+/* New session button */
+.primary-button {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  background: linear-gradient(135deg, var(--accent-start), var(--accent-end));
+  border-radius: 6px;
+  box-shadow: 0 0 10px rgba(0, 184, 255, 0.35);
+  transition: filter 0.15s, box-shadow 0.15s;
+}
+
+.primary-button:hover {
+  filter: brightness(1.12);
+  box-shadow: 0 0 14px rgba(0, 184, 255, 0.6);
+}
+
+.primary-button:active {
+  filter: brightness(0.95);
+}
+
+.primary-button:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+/* Chat list */
+.toolbar {
+  display: flex;
+  gap: 6px;
+  padding: 10px 14px 6px;
+  align-items: center;
+}
+
+.toolbar select,
+.toolbar input {
+  font: inherit;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 3px;
+  padding: 3px 6px;
+  min-width: 0;
+}
+
+.toolbar input {
+  flex: 1;
+}
+
+.toolbar select {
+  max-width: 40%;
+}
+
+.filter-button {
+  white-space: nowrap;
+  padding: 3px 6px;
+  border-radius: 3px;
+}
+
+.filter-button.is-on {
+  background: var(--vscode-button-secondaryBackground);
+}
+
+.chat-empty {
+  padding: 6px 14px;
+}
+
+.group-header {
+  padding: 6px 14px 4px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--vscode-descriptionForeground);
+  user-select: none;
+}
+
+.group-header:hover {
+  color: var(--vscode-foreground);
+}
+
+.chat-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+
+.chat-row:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.chat-row.is-selected {
+  background: var(--vscode-list-activeSelectionBackground);
+  color: var(--vscode-list-activeSelectionForeground);
+}
+
+.chat-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1.5px solid var(--vscode-foreground);
+  opacity: 0.5;
+  flex: none;
+}
+
+.chat-dot.is-active {
+  background: var(--vscode-charts-green);
+  border-color: var(--vscode-charts-green);
+  opacity: 1;
+}
+
+.chat-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-title {
+  display: block;
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-project {
+  font-size: 11px;
+  opacity: 0.6;
+}
+
+.chat-percent {
+  font-size: 11px;
+  opacity: 0.8;
+  min-width: 28px;
+  text-align: right;
+}
+
+.chat-percent.is-warning {
+  opacity: 1;
+  font-weight: 600;
+}
+
+.chat-age {
+  opacity: 0.6;
+  font-size: 12px;
+}
+
+.chat-actions {
+  display: none;
+  gap: 4px;
+}
+
+.chat-actions button {
+  font-size: 11px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+
+.chat-actions .delete-button:hover {
+  color: var(--vscode-errorForeground);
+  border-color: var(--vscode-errorForeground);
+}
+
+.chat-actions .permanent-delete-button {
+  padding: 1px 5px;
+}
+
+.chat-row:hover .chat-actions {
+  display: flex;
+}
+
+.chat-row:hover .chat-age {
+  display: none;
+}
+
+/* Insights */
+.insights-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.insights-header .section-title {
+  margin: 0;
+}
+
+.segmented {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.segmented button {
+  padding: 2px 9px;
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.segmented button.is-on {
+  background: linear-gradient(135deg, var(--accent-start), var(--accent-end));
+  color: #fff;
+  opacity: 1;
+}
+
+.tiles {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.tile {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent-end) 20%, transparent);
+}
+
+.tile-value {
+  display: block;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--accent-text);
+}
+
+.tile-label {
+  font-size: 11px;
+  opacity: 0.65;
+}
+
+.subheading {
+  font-size: 11px;
+  opacity: 0.6;
+  margin: 12px 0 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.heatmap {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(7, 1fr);
+  gap: 3px;
+}
+
+.heatmap-cell {
+  aspect-ratio: 1;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
+  cursor: pointer;
+}
+
+.heatmap-cell.is-selected {
+  outline: 1.5px solid var(--vscode-foreground);
+  outline-offset: 1px;
+}
+
+.heatmap-cell.is-spacer {
+  visibility: hidden;
+}
+
+.day-detail {
+  font-size: 12px;
+  margin: 8px 0 0;
+  min-height: 16px;
+  opacity: 0.9;
+}
+
+.bar-row {
+  margin: 6px 0;
+}
+
+.bar-row-header {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  gap: 8px;
+}
+
+.bar-row-header > :first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bar-row-track {
+  height: 5px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+  overflow: hidden;
+  margin-top: 3px;
+}
+
+.bar-row-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-start), #00e5ff);
+}
+
+.model-stack {
+  display: flex;
+  height: 8px;
+  border-radius: 4px;
+  overflow: hidden;
+  margin: 6px 0 8px;
+}
+
+.model-stack-segment {
+  height: 100%;
+}
+
+.legend-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  margin: 3px 0;
+}
+
+.legend-row > :first-child::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--swatch-color);
+  margin-right: 6px;
+}
+
+.insights-footer {
+  font-size: 12px;
+  opacity: 0.85;
+  margin-top: 12px;
+}
+
+/* "Live meters are off": the note is the button that turns them on. */
+#usage-note.is-clickable {
+  cursor: pointer;
+  text-decoration: underline;
+}

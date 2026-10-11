@@ -1,0 +1,253 @@
+// Runs the real compiled src/extension against a stubbed `vscode` module and a throwaway home folder.
+import test from 'node:test';
+import assert from 'node:assert';
+import fsPromises from 'node:fs/promises';
+import Module from 'node:module';
+import path from 'node:path';
+import { createTemporaryDirectory, writeTextFile, buildAssistantLine } from './helpers';
+import type { PanelState } from '../src/types';
+
+const KEEPER_ID = '99999999-2222-3333-4444-555555555555';
+const DOOMED_ID = '11111111-2222-3333-4444-555555555555';
+
+/** Node's module loader with its internal hook, which has no public type. */
+const moduleLoader: any = Module;
+
+/** What the stub records, so tests can assert on what the extension asked VS Code to do. */
+interface Recorded {
+  /** Each entry is [command, ...arguments]. */
+  executedCommands: unknown[][];
+  trashed: { path: string; useTrash: boolean }[];
+  /** What the next warning dialogs return, in order. */
+  warningAnswers: (string | undefined)[];
+  infoMessages: string[];
+  /** Registered webview view providers by id. */
+  providers: Record<string, any>;
+  /** The Trash call (0-based) at which the stub starts failing; Infinity for never. */
+  failTrashAfter: number;
+}
+
+const recorded: Recorded = { executedCommands: [], trashed: [], warningAnswers: [], infoMessages: [], providers: {}, failTrashAfter: Infinity };
+
+const vscodeStub = {
+  StatusBarAlignment: { Right: 2 },
+  ThemeColor: class {},
+  MarkdownString: class {
+    appendMarkdown() {}
+  },
+  Uri: {
+    file: (fsPath: string) => ({ fsPath, toString: () => `file://${fsPath}` }),
+    parse: (text: string) => ({ toString: () => text }),
+    joinPath: (base: { fsPath: string }, ...segments: string[]) => ({ fsPath: path.join(base.fsPath, ...segments), toString: () => path.join(base.fsPath, ...segments) }),
+  },
+  window: {
+    createStatusBarItem: () => ({ show() {}, dispose() {} }),
+    registerWebviewViewProvider: (id: string, provider: unknown) => ((recorded.providers[id] = provider), { dispose() {} }),
+    showWarningMessage: async () => recorded.warningAnswers.shift(),
+    showInformationMessage: async (message: string) => recorded.infoMessages.push(message),
+    showErrorMessage: async () => undefined,
+  },
+  workspace: {
+    workspaceFolders: [{ uri: { fsPath: '/p/a' } }], // the fixture chats ran in /p/a
+    registerTextDocumentContentProvider: () => ({ dispose() {} }),
+    onDidChangeWorkspaceFolders: () => ({ dispose() {} }),
+    fs: {
+      delete: async (uri: { fsPath: string }, options: { useTrash: boolean }) => {
+        await fsPromises.access(uri.fsPath); // like VS Code: deleting something that is not there throws
+        if (options.useTrash && recorded.trashed.filter((entry) => entry.useTrash).length >= recorded.failTrashAfter) throw new Error('Trash unavailable');
+        recorded.trashed.push({ path: uri.fsPath, useTrash: options.useTrash });
+        await fsPromises.rm(uri.fsPath, { recursive: true, force: true });
+      },
+    },
+  },
+  commands: {
+    registerCommand: () => ({ dispose() {} }),
+    executeCommand: async (command: string, ...args: unknown[]) => recorded.executedCommands.push([command, ...args]),
+  },
+};
+
+async function waitUntil(condition: () => boolean, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error('Timed out waiting for the extension');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+/**
+ * Build a fake home with two chats, a live payload that teaches the model's window, and an account.
+ * @param hasDuplicateKeeper Also put a copy of the Keeper log in a second project folder.
+ */
+async function createFakeHome(hasDuplicateKeeper = false): Promise<{ home: string; storage: string; claude: string }> {
+  const home = await createTemporaryDirectory();
+  const claude = path.join(home, '.claude');
+  const project = path.join(claude, 'projects', '-fake-proj');
+  const storage = path.join(home, 'store');
+  await writeTextFile(path.join(project, `${DOOMED_ID}.jsonl`), buildAssistantLine('m1', { sessionId: DOOMED_ID }) + '\n' + JSON.stringify({ type: 'ai-title', aiTitle: 'Doomed chat' }) + '\n');
+  await writeTextFile(path.join(project, DOOMED_ID, 'subagents', 'agent-1.jsonl'), buildAssistantLine('m2', { isSidechain: true, sessionId: DOOMED_ID }) + '\n');
+  await writeTextFile(path.join(project, `${KEEPER_ID}.jsonl`), buildAssistantLine('m3', { sessionId: KEEPER_ID }) + '\n' + JSON.stringify({ type: 'ai-title', aiTitle: 'Keeper' }) + '\n');
+  if (hasDuplicateKeeper) await writeTextFile(path.join(claude, 'projects', '-copied-proj', `${KEEPER_ID}.jsonl`), buildAssistantLine('m3', { sessionId: KEEPER_ID }) + '\n');
+  await writeTextFile(path.join(claude, 'file-history', DOOMED_ID, 'v1'));
+  await writeTextFile(path.join(claude, 'file-history', KEEPER_ID, 'v1'));
+  await writeTextFile(path.join(claude, 'session-env', DOOMED_ID, 'env'));
+  await writeTextFile(path.join(claude, 'security', `security_warnings_state_${DOOMED_ID}.json`));
+  await writeTextFile(path.join(storage, 'live', 'other.json'), JSON.stringify({ session_id: 'other', cwd: '/elsewhere', model: { id: 'claude-sonnet-5-5' }, context_window: { context_window_size: 1000000, used_percentage: 3 } }));
+  await writeTextFile(path.join(home, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: 'me@example.com', organizationType: 'claude_team', seatTier: 'team_standard', organizationName: 'Acme' } }));
+  return { home, storage, claude };
+}
+
+/** The options object the extension fills in. */
+function createWebviewOptions(): { localResourceRoots: { fsPath: string }[] } {
+  return { localResourceRoots: [] };
+}
+
+/** A minimal ExtensionContext: only what the extension reads. */
+function createFakeContext(storage: string): any {
+  const root = path.join(__dirname, '..');
+  return { globalStorageUri: { fsPath: storage }, extensionPath: root, extensionUri: { fsPath: root }, subscriptions: [] };
+}
+
+/** Load and start the extension against a fake home; returns a handle to the panel. */
+async function startExtension(hasDuplicateKeeper = false) {
+  const { home, storage, claude } = await createFakeHome(hasDuplicateKeeper);
+  process.env.HOME = home;
+  // `vscode` only exists inside VS Code, so the module loader is told to answer it with the stub. Node has no public
+  // API for this in CommonJS, hence the internal hook.
+  /* eslint-disable no-underscore-dangle */
+  const originalLoad = moduleLoader._load;
+  moduleLoader._load = function (this: unknown, request: string, ...rest: unknown[]) {
+    return request === 'vscode' ? vscodeStub : originalLoad.call(this, request, ...rest);
+  };
+  /* eslint-enable no-underscore-dangle */
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const extension: typeof import('../src/extension') = require('../src/extension'); // after the stub is installed, so it cannot be an import
+  const context = createFakeContext(storage);
+  await extension.activate(context);
+
+  const postedStates: PanelState[] = [];
+  const messageHandlers: ((message: unknown) => void)[] = [];
+  const webview = {
+    options: createWebviewOptions(),
+    html: '',
+    cspSource: 'vscode-webview://test',
+    asWebviewUri: (uri: { fsPath: string }) => ({ toString: () => `webview:${uri.fsPath}` }),
+    postMessage: (state: unknown) => postedStates.push(JSON.parse(JSON.stringify(state))),
+    onDidReceiveMessage: (handler: (message: unknown) => void) => messageHandlers.push(handler),
+  };
+  recorded.providers['complementer.panel'].resolveWebviewView({ webview, visible: true, onDidChangeVisibility() {}, onDidDispose() {} });
+  const send = (message: unknown) => messageHandlers[0](message);
+  send({ type: 'ready' });
+  await waitUntil(() => postedStates.at(-1)?.chats.length === (hasDuplicateKeeper ? 3 : 2));
+  const dispose = () => context.subscriptions.forEach((subscription: { dispose(): void }) => subscription.dispose());
+  return { home, storage, claude, webview, postedStates, send, deactivate: extension.deactivate, dispose };
+}
+
+function latestState(postedStates: PanelState[]): PanelState {
+  const state = postedStates.at(-1);
+  if (!state) throw new Error('the panel has not been sent any state yet');
+  return state;
+}
+
+test('the panel lists chats with context from the learned window, shows the account, and loads its files from src/views/', async (testContext) => {
+  const { webview, postedStates, dispose } = await startExtension();
+  testContext.after(dispose);
+  const state = latestState(postedStates);
+  assert.deepStrictEqual(state.account, { email: 'me@example.com', plan: 'Team · Standard', organization: 'Acme' });
+  assert.deepStrictEqual(state.chats.map((chat) => chat.title).sort(), ['Doomed chat', 'Keeper']);
+  assert.ok(state.chats.every((chat) => chat.context && Math.abs(chat.context.percent - 0.0112) < 1e-9)); // 112 tokens of the learned 1M window
+  assert.ok(webview.html.includes('webview:') && webview.html.includes('panel.css') && webview.html.includes('panel.js'));
+  assert.match(webview.html, /script-src 'nonce-[0-9a-f]{32}'/);
+  assert.deepStrictEqual(webview.options.localResourceRoots.map((root) => path.basename(root.fsPath)), ['views']);
+});
+
+test('pinning follows a session; opening a chat and New session use the official command', async (testContext) => {
+  const { postedStates, send, dispose } = await startExtension();
+  testContext.after(dispose);
+  recorded.executedCommands.length = 0;
+  send({ type: 'open', id: KEEPER_ID });
+  await waitUntil(() => postedStates.at(-1)?.usage.session?.isPinned === true);
+  assert.strictEqual(latestState(postedStates).usage.session?.title, 'Keeper');
+  assert.deepStrictEqual(recorded.executedCommands.at(-1), ['claude-vscode.primaryEditor.open', KEEPER_ID]);
+  send({ type: 'select', id: null });
+  await waitUntil(() => postedStates.at(-1)?.usage.session?.isPinned === false);
+  send({ type: 'new' });
+  await waitUntil(() => recorded.executedCommands.at(-1)?.length === 1);
+  assert.deepStrictEqual(recorded.executedCommands.at(-1), ['claude-vscode.primaryEditor.open']);
+});
+
+test('delete moves every per-session file to the Trash, keeps the other session, and keeps the offsets so a restore is not recounted', async (testContext) => {
+  const { claude, storage, postedStates, send, deactivate, dispose } = await startExtension();
+  testContext.after(dispose);
+  recorded.warningAnswers.push('Move to Trash');
+  recorded.trashed.length = 0;
+  send({ type: 'delete', id: DOOMED_ID });
+  await waitUntil(() => postedStates.at(-1)?.chats.length === 1);
+  assert.strictEqual(latestState(postedStates).chats[0].title, 'Keeper');
+  assert.strictEqual(recorded.trashed.length, 5); // log, subagent folder, file history, session env, security state
+  assert.ok(recorded.trashed.every((entry) => entry.useTrash === true));
+  const project = path.join(claude, 'projects', '-fake-proj');
+  await assert.rejects(fsPromises.access(path.join(project, `${DOOMED_ID}.jsonl`)));
+  await fsPromises.access(path.join(project, `${KEEPER_ID}.jsonl`));
+  await fsPromises.access(path.join(claude, 'file-history', KEEPER_ID, 'v1'));
+  send({ type: 'delete', id: '../../etc/passwd' }); // an unknown id does nothing
+  await deactivate();
+  const saved = JSON.parse(await fsPromises.readFile(path.join(storage, 'history.json'), 'utf8'));
+  const scannedLogs = Object.keys(saved.fileStates).map((filePath) => path.basename(filePath));
+  assert.ok(scannedLogs.includes(`${DOOMED_ID}.jsonl`) && scannedLogs.includes(`${KEEPER_ID}.jsonl`)); // a restored log must not be rescanned from 0
+});
+
+test('permanent delete asks for its own confirmation and does not use the Trash', async (testContext) => {
+  const { claude, postedStates, send, dispose } = await startExtension();
+  testContext.after(dispose);
+  recorded.trashed.length = 0;
+  recorded.warningAnswers.push('Move to Trash'); // the Trash answer must not confirm a permanent delete
+  send({ type: 'deletePermanently', id: DOOMED_ID });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.strictEqual(recorded.trashed.length, 0);
+  recorded.warningAnswers.push('Delete permanently');
+  send({ type: 'deletePermanently', id: DOOMED_ID });
+  await waitUntil(() => postedStates.at(-1)?.chats.length === 1);
+  assert.ok(recorded.trashed.length > 0 && recorded.trashed.every((entry) => entry.useTrash === false));
+  await assert.rejects(fsPromises.access(path.join(claude, 'projects', '-fake-proj', `${DOOMED_ID}.jsonl`)));
+});
+
+test('declining the confirmation deletes nothing', async (testContext) => {
+  const { claude, postedStates, send, dispose } = await startExtension();
+  testContext.after(dispose);
+  recorded.warningAnswers.push(undefined); // the user dismisses the dialog
+  recorded.trashed.length = 0;
+  send({ type: 'delete', id: KEEPER_ID });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.strictEqual(recorded.trashed.length, 0);
+  assert.strictEqual(latestState(postedStates).chats.length, 2);
+  await fsPromises.access(path.join(claude, 'projects', '-fake-proj', `${KEEPER_ID}.jsonl`));
+});
+
+test('when the Trash fails halfway, the permanent fallback removes only what is left and finishes the job', async (testContext) => {
+  const { claude, postedStates, send, dispose } = await startExtension();
+  testContext.after(dispose);
+  recorded.trashed.length = 0;
+  recorded.failTrashAfter = 2; // two files reach the Trash, the third fails
+  testContext.after(() => (recorded.failTrashAfter = Infinity));
+  recorded.warningAnswers.push('Move to Trash', 'Delete permanently');
+  send({ type: 'delete', id: DOOMED_ID });
+  await waitUntil(() => postedStates.at(-1)?.chats.length === 1);
+  assert.strictEqual(recorded.trashed.filter((entry) => !entry.useTrash).length, 3); // the other three of the five, none twice
+  await assert.rejects(fsPromises.access(path.join(claude, 'file-history', DOOMED_ID)));
+  await assert.rejects(fsPromises.access(path.join(claude, 'projects', '-fake-proj', `${DOOMED_ID}.jsonl`)));
+});
+
+test('a session id that exists in two project folders is never deleted from the panel', async (testContext) => {
+  const { claude, send, dispose } = await startExtension(true);
+  testContext.after(dispose);
+  recorded.trashed.length = 0;
+  recorded.infoMessages.length = 0;
+  recorded.warningAnswers.push('Move to Trash');
+  send({ type: 'delete', id: KEEPER_ID });
+  await waitUntil(() => recorded.infoMessages.some((message) => /share this session id/.test(message)));
+  assert.strictEqual(recorded.trashed.length, 0);
+  assert.strictEqual(recorded.warningAnswers.length, 1); // no dialog was even shown
+  recorded.warningAnswers.length = 0;
+  await fsPromises.access(path.join(claude, 'projects', '-fake-proj', `${KEEPER_ID}.jsonl`));
+  await fsPromises.access(path.join(claude, 'projects', '-copied-proj', `${KEEPER_ID}.jsonl`));
+});

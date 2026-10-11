@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src {{cspSource}}; script-src 'nonce-{{nonce}}';" />
+    <link rel="stylesheet" href="{{styleUri}}" />
+    <title>Complementer</title>
+  </head>
+  <body>
+    <section id="account" class="section" hidden>
+      <h2 class="section-title">Account</h2>
+      <div id="account-rows"></div>
+    </section>
+
+    <section id="usage" class="section">
+      <h2 class="section-title">Usage</h2>
+      <div id="session-line" class="muted session-line"></div>
+      <div id="meters"></div>
+      <div id="usage-note" class="muted"></div>
+    </section>
+
+    <section class="section">
+      <h2 class="section-title">Session manager</h2>
+      <button id="new-session" class="primary-button"><span aria-hidden="true">＋</span> New session</button>
+    </section>
+
+    <div class="toolbar">
+      <select id="project-filter" title="Project"></select>
+      <button id="active-filter" class="filter-button" title="Show only chats used in the last 5 minutes"></button>
+      <input id="search" type="search" placeholder="Search chats" />
+    </div>
+    <ul id="chat-list"></ul>
+    <div id="chat-empty" class="muted chat-empty"></div>
+
+    <section id="insights" class="section last-section">
+      <div class="insights-header">
+        <h2 class="section-title">Insights</h2>
+        <div id="range-switch" class="segmented"></div>
+      </div>
+      <div id="insights-body"></div>
+    </section>
+
+    <script nonce="{{nonce}}" src="{{scriptUri}}"></script>
+  </body>
+</html>

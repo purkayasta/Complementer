@@ -1,0 +1,14 @@
+# Whitelist: ship only what runs. Sources, tests, docs, configs and tooling stay out of the package.
+**
+!package.json
+!README.md
+!CHANGELOG.md
+!LICENSE
+!resources/icon.png
+!resources/icon.svg
+!media/*.png
+!out/src/**
+# Never ship type maps, declaration files or TypeScript sources, even inside out/src.
+out/**/*.map
+out/**/*.d.ts
+**/*.ts

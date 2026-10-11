@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "target": "ES2022",
+    "module": "nodenext",
+    "rootDir": ".",
+    "outDir": "out",
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["src", "test"],
+  "exclude": ["src/views/panel.ts"]
+}

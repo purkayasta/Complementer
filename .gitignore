@@ -1,0 +1,15 @@
+# dependencies
+node_modules/
+
+# packaged extension builds: never commit these
+*.vsix
+release/*.vsix
+
+# OS and editor noise
+.DS_Store
+*.log
+.vscode-test/
+
+# TypeScript build output
+out/
+*.tsbuildinfo
