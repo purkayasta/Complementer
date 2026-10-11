@@ -4,6 +4,13 @@ Shows what Claude Code does not: how full your context is, how much of your 5-ho
 
 Independent project, not affiliated with Anthropic.
 
+[![Version](https://img.shields.io/visual-studio-marketplace/v/pritompurkayasta.complementer?label=marketplace)](https://marketplace.visualstudio.com/items?itemName=pritompurkayasta.complementer)
+[![Installs](https://img.shields.io/visual-studio-marketplace/i/pritompurkayasta.complementer)](https://marketplace.visualstudio.com/items?itemName=pritompurkayasta.complementer)
+[![Downloads](https://img.shields.io/visual-studio-marketplace/d/pritompurkayasta.complementer)](https://marketplace.visualstudio.com/items?itemName=pritompurkayasta.complementer)
+[![Rating](https://img.shields.io/visual-studio-marketplace/r/pritompurkayasta.complementer)](https://marketplace.visualstudio.com/items?itemName=pritompurkayasta.complementer&ssr=false#review-details)
+[![CI](https://github.com/purkayasta/complementer/actions/workflows/ci.yml/badge.svg)](https://github.com/purkayasta/complementer/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/github/license/purkayasta/complementer)](LICENSE)
+
 <p align="center">
   <img src="media/usage.png" alt="5-hour and weekly usage meters with reset countdowns, above the New session button" width="340">
   &nbsp;&nbsp;
@@ -20,7 +27,7 @@ Independent project, not affiliated with Anthropic.
 
 ## Getting started
 
-1. Install the extension. It requires the Claude Code extension.
+1. Install [Complementer from the Marketplace](https://marketplace.visualstudio.com/items?itemName=pritompurkayasta.complementer), or run `ext install pritompurkayasta.complementer` in the Quick Open box (Ctrl/Cmd+P). It requires the Claude Code extension.
 2. Open the Complementer icon in the activity bar.
 3. Run **Complementer: Enable live meters** to show the 5-hour and weekly limits.
 
