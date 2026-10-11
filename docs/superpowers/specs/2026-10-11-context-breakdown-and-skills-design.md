@@ -8,7 +8,7 @@ Show what is bloating the selected session's context so the user can avoid re-re
 
 ## Decisions already made
 
-- **Placement:** inside the Usage section of the Sessions panel (no new section). One stacked bar under the Context meter, a one-line legend, and a collapsed-by-default "Details" toggle. Details holds category sizes (with per-tool subtotals), "Biggest items" and "Skills used". Mockups: `.superpowers`-style screens `usage-breakdown.html` and `usage-breakdown-v2.html` (brainstorm session, not committed).
+- **Placement:** inside the Usage section of the Sessions panel (no new section). One stacked bar under the Context meter, a one-line legend (a coloured dot per entry, matching the bar), and a collapsed-by-default "Details" toggle. Details holds category sizes (with per-tool subtotals), "Biggest tool outputs" (target shortened to a file name, or the command without its leading `cd <dir> &&`; full text on hover) and "Skills used". Mockups: `.superpowers`-style screens `usage-breakdown.html` and `usage-breakdown-v2.html` (brainstorm session, not committed).
 - **Purpose:** spot what is bloating the context (so top offenders are in scope).
 - **Skills:** session list in Details, plus a "Top skills" list in Insights that follows the 7/30/90-day switch.
 - **Skills backfill:** a separate `skills.json` with its own offsets, filled once from the logs still on disk. The token history file is not touched.
@@ -41,7 +41,7 @@ It stores sizes and names only, never message text. An in-memory cache keyed by 
 ### `src/skills.ts` (new, I/O) and `skills.json`
 A small scanner, same pattern as `Scanner`/`History` but its own file:
 ```
-skills.json: { version: 1, days: { "YYYY-MM-DD": { "<skill>": count } }, fileStates: { "<log path>": { offset } } }
+skills.json: { version: 2, days: { "YYYY-MM-DD": { "<skill>": count } }, sessions: { "<sessionId>": { "<skill>": count } }, fileStates: { "<log path>": { offset } } }
 ```
 - Pre-filter on the raw bytes (`"name":"Skill"`) before any JSON parsing, so the one-time pass over existing logs is cheap.
 - Written atomically like `history.json`. A missing, unreadable or wrong-version file is moved to `.bad` and rebuilt from the logs on disk.
@@ -51,7 +51,7 @@ skills.json: { version: 1, days: { "YYYY-MM-DD": { "<skill>": count } }, fileSta
 
 ### Panel (`panel.html`, `panel.css`, `panel.ts`)
 - Under the Context meter: one full-width stacked bar of what the used context is made of (the Context meter above shows how full the window is), legend of the three largest parts, "▸ Details".
-- Details (collapsed by default; the choice lives in the webview state): category rows with per-tool subtotals, "Biggest items", "Skills used" (name, bar, "×N uses"). Hidden when empty. A line says "Baseline and total are exact. The split is an estimate."
+- Details (collapsed by default; the choice lives in the webview state): category rows with per-tool subtotals, "Biggest tool outputs" (target shortened to a file name, or the command without its leading `cd <dir> &&`; full text on hover), "Skills used" (name, bar, "×N uses"). Hidden when empty. A line says "Baseline and total are exact. The split is an estimate."
 - Insights: a "Top skills" list next to Top projects and Model mix.
 - Rendered with DOM calls and `textContent` only (tool names, paths and skill names come from log files). Colours via classes or `style.setProperty`; no inline styles (CSP).
 

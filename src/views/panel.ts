@@ -99,6 +99,7 @@ const elements = {
   sessionLine: getElement('session-line'),
   meters: getElement('meters'),
   usageNote: getElement('usage-note'),
+  refreshUsage: getElement('refresh-usage'),
   newSession: getElement('new-session'),
   projectFilter: getSelect('project-filter'),
   activeFilter: getElement('active-filter'),
@@ -129,7 +130,7 @@ function formatTokens(tokens: number) {
   if (tokens >= 1e9) return (tokens / 1e9).toFixed(1) + 'B';
   if (tokens >= 1e6) return (tokens / 1e6).toFixed(1) + 'M';
   if (tokens >= 1e3) return (tokens / 1e3).toFixed(1) + 'k';
-  return String(tokens);
+  return String(Math.round(tokens));
 }
 
 /** @param dateKey YYYY-MM-DD */
@@ -183,14 +184,25 @@ function renderMeter(label: string, meter: MeterView, normalColor: string) {
   );
 }
 
+/** The "Limits updated 3m ago" line, kept so the clock can change its text without rebuilding the section. */
+const limitsAge: { element: HTMLElement | null; updatedAtMs: number } = { element: null, updatedAtMs: 0 };
+
+function limitsAgeText(updatedAtMs: number) {
+  const age = formatAge(updatedAtMs);
+  return 'Limits updated ' + age + (age === 'now' ? '' : ' ago');
+}
+
 function renderUsage(usage: PanelState['usage']) {
+  limitsAge.updatedAtMs = usage.limitsUpdatedAtMs ?? 0;
+  limitsAge.element = usage.limitsUpdatedAtMs ? buildElement('div', { className: 'muted limits-age' }, limitsAgeText(usage.limitsUpdatedAtMs)) : null;
   const contextMeter = usage.context && renderMeter('Context', usage.context, 'var(--vscode-charts-blue)');
   const contextDetails = renderContextDetails(usage);
   if (contextMeter) contextMeter.append(...contextDetails);
   const meters = [
-    contextMeter,
     usage.fiveHour && renderMeter('Session (5hr)', usage.fiveHour, 'var(--vscode-charts-orange)'),
     usage.weekly && renderMeter('Weekly (7 day)', usage.weekly, 'var(--vscode-charts-purple)'),
+    limitsAge.element,
+    contextMeter,
     ...(contextMeter ? [] : contextDetails), // no context meter to sit under: the skills list still shows
     usage.costLabel ? buildElement('div', { className: 'muted' }, 'Session cost ' + usage.costLabel) : null,
   ];
@@ -228,8 +240,9 @@ function renderBreakdownBar(breakdown: Breakdown) {
     buildElement('div', { className: 'breakdown-segment', title: `Baseline ${formatTokens(breakdown.baselineTokens)}`, style: { width: share(breakdown.baselineTokens), background: BASELINE_COLOR } }),
     ...breakdown.parts.map((part) => buildElement('div', { className: 'breakdown-segment', title: `${KIND_LABELS[part.kind]} ~${formatTokens(part.tokens)}`, style: { width: share(part.tokens), background: KIND_COLORS[part.kind] } })),
   ];
-  const legend = [`Baseline ${formatTokens(breakdown.baselineTokens)}`, ...breakdown.parts.slice(0, LEGEND_PARTS).map((part) => `${KIND_LABELS[part.kind]} ~${formatTokens(part.tokens)}`)].join(' · ');
-  return [buildElement('div', { className: 'breakdown-stack' }, ...segments), buildElement('div', { className: 'muted breakdown-legend' }, legend)];
+  const legendItem = (label: string, color: string) => buildElement('span', { className: 'legend-item', style: { '--swatch-color': color } }, label);
+  const legend = [legendItem(`Baseline ${formatTokens(breakdown.baselineTokens)}`, BASELINE_COLOR), ...breakdown.parts.slice(0, LEGEND_PARTS).map((part) => legendItem(`${KIND_LABELS[part.kind]} ~${formatTokens(part.tokens)}`, KIND_COLORS[part.kind]))];
+  return [buildElement('div', { className: 'breakdown-stack' }, ...segments), buildElement('div', { className: 'muted breakdown-legend' }, ...legend)];
 }
 
 function renderBreakdownRows(breakdown: Breakdown) {
@@ -241,17 +254,23 @@ function renderBreakdownRows(breakdown: Breakdown) {
   ];
 }
 
+/** Short label for a tool target: a file's name, or a command without its leading `cd <dir> &&`. The full text stays in the tooltip. */
+function shortenTarget(target: string) {
+  const command = target.replace(/^cd\s+\S+\s*&&\s*/, '');
+  return command.startsWith('/') && !command.includes(' ') ? command.split('/').pop() || command : command;
+}
+
 function renderBiggestResults(breakdown: Breakdown) {
   if (!breakdown.biggestResults.length) return [];
   const rows = breakdown.biggestResults.map((result) =>
     buildElement(
       'div',
       { className: 'biggest-row', title: result.target },
-      buildElement('div', { className: 'biggest-row-header' }, buildElement('span', {}, result.target ? `${result.tool} · ${result.target}` : result.tool), buildElement('span', {}, `~${formatTokens(result.tokens)}`)),
+      buildElement('div', { className: 'biggest-row-header' }, buildElement('span', {}, result.target ? `${result.tool} · ${shortenTarget(result.target)}` : result.tool), buildElement('span', {}, `~${formatTokens(result.tokens)}`)),
       buildElement('div', { className: 'muted' }, `turn ${result.turn}`),
     ),
   );
-  return [buildElement('div', { className: 'subheading' }, 'Biggest items'), ...rows];
+  return [buildElement('div', { className: 'subheading' }, 'Biggest tool outputs'), ...rows];
 }
 
 /** The bar, then a "Details" toggle (closed by default) that opens the parts, the biggest items and the skills used. */
@@ -301,7 +320,7 @@ function renderChatRow(chat: PanelChat, activeChatId: string | undefined) {
     'li',
     { className: 'chat-row' + (chat.id === activeChatId ? ' is-selected' : ''), title: `${chat.title}\n${new Date(chat.modifiedAtMs).toLocaleString()}`, onClick: () => postChatMessage('open', chat.id) },
     buildElement('span', { className: 'chat-dot' + (isActive(chat.modifiedAtMs) ? ' is-active' : '') }),
-    buildElement('div', { className: 'chat-text' }, buildElement('b', { className: 'chat-title' }, chat.title), buildElement('span', { className: 'chat-project' }, chat.projectName)),
+    buildElement('div', { className: 'chat-text' }, buildElement('b', { className: 'chat-title' }, chat.title), buildElement('span', { className: 'chat-project' }, chat.projectName), chat.skills ? buildElement('span', { className: 'chat-skills', title: 'Skills used in this chat' }, chat.skills.map(([name, count]) => `${name} ×${count}`).join(' · ')) : null),
     buildElement('span', { className: 'chat-percent' + (percentColor ? ' is-warning' : ''), style: percentColor ? { color: percentColor } : {}, title: chat.context ? 'Context use' : '' }, chat.context ? Math.round(chat.context.percent) + '%' : ''),
     buildElement('span', { className: 'chat-age' }, formatAge(chat.modifiedAtMs)),
     buildElement(
@@ -505,6 +524,7 @@ function renderAll() {
 }
 
 elements.newSession.addEventListener('click', () => vscode.postMessage({ type: 'new' }));
+elements.refreshUsage.addEventListener('click', () => vscode.postMessage({ type: 'refreshLimits' }));
 elements.usageNote.addEventListener('click', () => {
   if (viewState.panelState?.usage.isLiveOff) vscode.postMessage({ type: 'enable' });
 });
@@ -527,5 +547,6 @@ window.addEventListener('message', (event) => {
   renderAll();
 });
 setInterval(renderChatList, REFRESH_INTERVAL_MS); // relative times and the Active dot move with the clock
+setInterval(() => limitsAge.element && (limitsAge.element.textContent = limitsAgeText(limitsAge.updatedAtMs)), REFRESH_INTERVAL_MS); // "Limits updated 3m ago" moves with the clock
 
 vscode.postMessage({ type: 'ready' });

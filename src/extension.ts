@@ -9,11 +9,12 @@ import { LiveFeed, readAccountIfChanged } from './live';
 import { ChatIndex, renderTranscript, getSessionPaths } from './chats';
 import { SkillHistory } from './skills';
 import { createSessionTally, readSessionTally } from './breakdown';
+import { queryUsage } from './usage';
 import * as setup from './setup';
 import * as viewModel from './view-model';
 import type { Account, Chat, LiveState, Meters, PanelMessage, SessionTally, SetupPaths, WindowSizeReport, WindowState } from './types';
-import { VIEWS_DIRECTORY, CONFIG_SECTION, CHAT_SCHEME, CLAUDE_OPEN_COMMAND, REFRESH_DEBOUNCE_MS, SCAN_DEBOUNCE_MS, SAVE_DEBOUNCE_MS, POLL_INTERVAL_MS, CLOCK_TICK_MS, ACTIVE_SESSION_MS } from './consts';
-import { tryReadText, filterExistingPaths, tryParseJson, errorMessage } from './utils';
+import { USAGE_QUERY_MIN_GAP_MS, USAGE_QUERY_INTERVAL_MS, REFRESH_LIMITS_WAIT_MS, REFRESH_LIMITS_POLL_MS, REFRESH_LIMITS_CLOSE_MS, REFRESH_RESUME_BUSY_MS, VIEWS_DIRECTORY, CONFIG_SECTION, CHAT_SCHEME, CLAUDE_OPEN_COMMAND, UUID_PATTERN, REFRESH_DEBOUNCE_MS, SCAN_DEBOUNCE_MS, SAVE_DEBOUNCE_MS, POLL_INTERVAL_MS, CLOCK_TICK_MS, ACTIVE_SESSION_MS } from './consts';
+import { tryReadText, pathExists, filterExistingPaths, tryParseJson, errorMessage } from './utils';
 
 // The compiled folder holds the hook script and the panel's files next to this one, wherever the extension is installed.
 
@@ -25,6 +26,9 @@ class ComplementerExtension {
 
   /** The session the user pinned; undefined means follow the latest one in this workspace. */
   selectedSessionId: string | undefined;
+
+  /** Sessions started by Activate: they feed the limits but are never the session the panel follows. */
+  readonly activationSessionIds = new Set<string>();
 
   account: Account | undefined;
 
@@ -61,6 +65,14 @@ class ComplementerExtension {
   pollTimer: NodeJS.Timeout | undefined;
 
   clockTimer: NodeJS.Timeout | undefined;
+
+  usageTimer: NodeJS.Timeout | undefined;
+
+  isQueryingUsage = false;
+
+  isRefreshingLimits = false;
+
+  lastUsageQueryMs = 0;
 
   logWatcher: fs.FSWatcher | undefined;
 
@@ -122,12 +134,15 @@ class ComplementerExtension {
       vscode.commands.registerCommand(`${CONFIG_SECTION}.enableLive`, () => this.enableLiveMeters()),
       vscode.commands.registerCommand(`${CONFIG_SECTION}.disableLive`, () => this.disableLiveMeters()),
       vscode.commands.registerCommand(`${CONFIG_SECTION}.newSession`, () => this.startNewSession()),
+      vscode.commands.registerCommand(`${CONFIG_SECTION}.refreshLimits`, () => this.refreshLimits()),
       vscode.commands.registerCommand(`${CONFIG_SECTION}.dockPanel`, () => this.dockPanel()),
       vscode.workspace.onDidChangeWorkspaceFolders(() => this.requestRefresh()),
     );
     this.watchLogs();
     this.pollTimer = setInterval(() => this.poll(), POLL_INTERVAL_MS);
     this.clockTimer = setInterval(() => this.renderStatusBar(), CLOCK_TICK_MS);
+    this.refreshUsageLimits();
+    this.usageTimer = setInterval(() => this.refreshUsageLimits(), USAGE_QUERY_INTERVAL_MS);
     this.renderStatusBar();
     this.refreshAccount();
     this.refreshHookCopy();
@@ -142,6 +157,7 @@ class ComplementerExtension {
     for (const timer of [this.refreshTimer, this.scanTimer, this.saveTimer, this.chatIndexTimer]) clearTimeout(timer);
     clearInterval(this.pollTimer);
     clearInterval(this.clockTimer);
+    clearInterval(this.usageTimer);
     this.liveFeed.dispose();
   }
 
@@ -163,6 +179,7 @@ class ComplementerExtension {
       selectedSessionId: this.selectedSessionId,
       windowSizes: this.windowSizes,
       nowMs: Date.now(),
+      ignoredSessionIds: this.activationSessionIds,
     });
     if (meters.selectedSessionIsMissing) this.selectedSessionId = undefined; // its log was deleted
     return meters;
@@ -280,6 +297,7 @@ class ComplementerExtension {
       isLiveEnabled: this.isLiveEnabled,
       chats: this.chatIndex.chats,
       workspaceFolders: this.workspaceFolders(),
+      skillSessions: this.skillHistory.sessions,
       windowSizes: this.windowSizes,
       insights: viewModel.computeInsights(this.history.days, new Date(), this.skillHistory.days),
       breakdown: viewModel.computeBreakdown(this.sessionTally, meters.contextWindowSize),
@@ -328,6 +346,9 @@ class ComplementerExtension {
         break;
       case 'enable':
         this.enableLiveMeters();
+        break;
+      case 'refreshLimits':
+        this.refreshLimits();
         break;
       case 'open':
         if (chat) this.openInClaude(chat);
@@ -460,7 +481,7 @@ class ComplementerExtension {
       if (!plan.isAlreadyEnabled && !(await this.confirmEnable(plan))) return;
       await setup.enableStatusLine(this.setupPaths);
       await this.refreshLiveEnabled();
-      vscode.window.showInformationMessage('Live meters are on. Send a message in Claude Code and exact usage will appear here.');
+      vscode.window.showInformationMessage('Live meters are on. Send a message in a Claude Code terminal session (the chat panel does not report limits) and exact usage will appear here.');
     } catch (error) {
       vscode.window.showErrorMessage(`Could not turn on live meters: ${errorMessage(error)}`);
     }
@@ -470,7 +491,7 @@ class ComplementerExtension {
   async confirmEnable(plan: { commandBefore: string; commandAfter: string }): Promise<boolean> {
     const firstChoice = await vscode.window.showInformationMessage(
       'Turn on live meters?',
-      { modal: true, detail: 'Adds a small helper to your Claude Code status line so exact context and plan usage can show here.\n\nYour current status line keeps working as before. You can undo this anytime with "Complementer: Disable live meters".' },
+      { modal: true, detail: 'Adds a small helper to your Claude Code status line so exact context and plan usage can show here. Claude Code only runs the status line in terminal sessions, not in the chat panel.\n\nYour current status line keeps working as before. You can undo this anytime with "Complementer: Disable live meters".' },
       'Turn on',
       'Show details',
     );
@@ -493,6 +514,91 @@ class ComplementerExtension {
       vscode.window.showInformationMessage(changed ? 'Live meters are off. Your original status line is restored.' : 'Live meters were not enabled.');
     } catch (error) {
       vscode.window.showErrorMessage(`Could not disable live meters: ${errorMessage(error)}`);
+    }
+  }
+
+  /**
+   * The Refresh button. The chat panel never runs the status line, so resume the followed session in a terminal
+   * (its folder, same session id): the terminal reports the context and the limits too. Once the screen is up it sends
+   * one short message, waits for the limits, then exits and closes the terminal. With no session to follow it starts a
+   * fresh one instead (an Activate helper that never becomes the followed session). It never answers a trust prompt:
+   * if nothing arrives in time the terminal stays open for the user. One run at a time: a second click does nothing.
+   */
+  async refreshLimits() {
+    if (this.isRefreshingLimits) return;
+    this.isRefreshingLimits = true;
+    try {
+      await this.refreshLimitsInTerminal();
+    } finally {
+      this.isRefreshingLimits = false;
+    }
+  }
+
+  async refreshLimitsInTerminal() {
+    if (!this.hasLiveFeed()) await this.enableLiveMeters();
+    if (!this.hasLiveFeed()) return;
+    const { chat } = this.computeMeters();
+    const resumedChat = chat && UUID_PATTERN.test(chat.id) ? chat : undefined;
+    if (resumedChat && Date.now() - resumedChat.modifiedAtMs < REFRESH_RESUME_BUSY_MS && !(await this.confirmResume(resumedChat))) return;
+    const terminal = vscode.window.createTerminal({ name: 'Claude (refresh limits)', cwd: resumedChat?.workingDirectory ?? this.workspaceFolders()[0] ?? os.homedir() });
+    terminal.show();
+    const sessionId = resumedChat?.id ?? crypto.randomUUID();
+    if (!resumedChat) this.activationSessionIds.add(sessionId);
+    const startedAtMs = Date.now();
+    terminal.sendText(resumedChat ? `claude --resume ${sessionId}` : `claude --session-id ${sessionId}`);
+    // A resumed session may already have an older payload (they are kept for days): only one written after `sinceMs` counts.
+    const hasPayloadSince = (sinceMs: number, needsLimit: boolean) => {
+      const state = this.liveFeed.states.get(`${sessionId}.json`);
+      return Boolean(state && state.updatedAt >= sinceMs && (!needsLimit || state.fiveHourLimit));
+    };
+    const waitFor = async (isDone: () => boolean) => {
+      for (let waitedMs = 0; waitedMs < REFRESH_LIMITS_WAIT_MS && !isDone(); waitedMs += REFRESH_LIMITS_POLL_MS) await new Promise((resolve) => setTimeout(resolve, REFRESH_LIMITS_POLL_MS));
+      return isDone();
+    };
+    const hasStarted = await waitFor(() => hasPayloadSince(startedAtMs, false));
+    if (hasStarted) terminal.sendText('hi');
+    const askedAtMs = Date.now();
+    if (!hasStarted || !(await waitFor(() => hasPayloadSince(askedAtMs, true)))) {
+      vscode.window.showInformationMessage('No limits yet. Answer any prompt in the terminal and send "hi" once; then type /exit.');
+      return;
+    }
+    terminal.sendText('/exit');
+    await new Promise((resolve) => setTimeout(resolve, REFRESH_LIMITS_CLOSE_MS));
+    terminal.dispose();
+    vscode.window.showInformationMessage('Live limits are active.');
+  }
+
+  /** Refresh adds a message to the chat it resumes. If the chat changed a moment ago the official panel may have it open, and two Claude processes on one chat can mix up its history. */
+  async confirmResume(chat: Chat): Promise<boolean> {
+    const answer = await vscode.window.showWarningMessage('Resume this chat in a terminal?', { modal: true, detail: `"${chat.title}" changed in the last minute, so it may be open in the Claude chat panel. Refresh sends "hi" to it from a second Claude process.` }, 'Resume anyway');
+    return answer === 'Resume anyway';
+  }
+
+  /** The `claude` that ships inside the official extension (the one the chat panel runs); undefined when that extension is not installed. */
+  async findClaudeBinary(): Promise<string | undefined> {
+    const extensionPath = vscode.extensions?.getExtension('anthropic.claude-code')?.extensionPath;
+    if (!extensionPath) return undefined;
+    const binaryPath = path.join(extensionPath, 'resources', 'native-binary', process.platform === 'win32' ? 'claude.exe' : 'claude');
+    return (await pathExists(binaryPath)) ? binaryPath : undefined;
+  }
+
+  /**
+   * Ask Claude Code for the plan limits (see usage.ts) so the chat panel needs no terminal. A success is stored like a
+   * live payload with no folder, so it feeds the limits only. On failure nothing changes: the data ages into "stale"
+   * and the ↻ button in the panel still refreshes through a terminal.
+   */
+  async refreshUsageLimits() {
+    if (this.isQueryingUsage) return;
+    this.isQueryingUsage = true;
+    this.lastUsageQueryMs = Date.now();
+    try {
+      const binaryPath = await this.findClaudeBinary();
+      const limits = binaryPath ? await queryUsage(binaryPath, this.storageDirectory) : undefined;
+      if (!limits) return;
+      this.liveFeed.states.set('usage-query.json', { sessionId: 'usage-query', workingDirectory: '', ...limits, updatedAt: Date.now() });
+      this.requestRefresh();
+    } finally {
+      this.isQueryingUsage = false;
     }
   }
 
@@ -540,6 +646,7 @@ class ComplementerExtension {
 
   onScanComplete(hadNewData: boolean) {
     if (!hadNewData) return;
+    if (Date.now() - this.lastUsageQueryMs >= USAGE_QUERY_MIN_GAP_MS) this.refreshUsageLimits(); // new messages moved the limits
     this.requestRefresh();
     this.scheduleChatIndexing();
     clearTimeout(this.saveTimer);

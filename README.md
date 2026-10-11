@@ -20,7 +20,7 @@ Independent project, not affiliated with Anthropic.
 - **Usage meters.** Context, 5-hour and weekly limits in the status bar and the Sessions panel, with reset countdowns. Yellow above 50%, red from 80%.
 - **Session manager.** Chats grouped by project, each with its own context %. Search, open, read as a transcript, or delete (to the Trash, or permanently with ✕). Start a new session in one click.
 - **Insights.** Over 7, 30 or 90 days: tokens, cache hit rate, active days, a 13-week heatmap, top projects, top skills, model mix and streak.
-- **Context breakdown.** Under the Context meter: a full-width bar of what the used context is made of (fixed baseline, tool results, assistant text, your messages) and, under Details, the biggest items and the skills used in that session. The split is an estimate.
+- **Context breakdown.** Under the Context meter (listed after the 5-hour and weekly meters): a full-width bar of what the used context is made of (fixed baseline, tool results, assistant text, your messages) with a colour-keyed legend and, under Details, the biggest tool outputs (shown by file name or command) and the skills used in that session. The split is an estimate.
 - **Account.** Your email, plan and organization.
 
 ## Getting started
@@ -33,13 +33,14 @@ Context % and the session list work without step 3.
 
 ## Live meters
 
-Plan limits are only available through Claude Code's status line. Enabling live meters adds a small passthrough in front of it. The extension asks first, shows the exact change, and keeps your own status line working. **Disable live meters**, or uninstalling, restores your settings exactly. With two copies installed, removing one leaves the other's live meters alone.
+Plan limits come from Claude Code itself. The extension asks the Claude Code that is already installed for them every few minutes (no message is sent, so no plan usage), and this needs no setup. If that is not possible on your machine, press the ↻ icon next to Usage. Terminal sessions also report limits through Claude Code's status line. Enabling live meters adds a small passthrough in front of it. The extension asks first, shows the exact change, and keeps your own status line working. Claude Code runs the status line only in terminal sessions (`claude` in a terminal, or the `claudeCode.useTerminal` setting), not in the native chat panel, so the live meters fill in from those; the 5-hour and weekly limits are account-wide, so one terminal session keeps them current. The **↻ Refresh** icon at the right of the Usage heading (also the command **Complementer: Refresh limits**) resumes the session shown under "Following" in a terminal, sends one short message ("hi"), waits for the limits to arrive, then exits and closes it. This updates the context meter too. It costs a few tokens and adds one short message to that session. If that chat changed in the last minute (it may be open in the chat panel), it asks before resuming it. If nothing arrives within 30 seconds (for example a trust prompt is waiting), the terminal stays open for you. **Disable live meters**, or uninstalling, restores your settings exactly. With two copies installed, removing one leaves the other's live meters alone.
 
 ## Commands
 
 | Command | Action |
 |---|---|
 | Complementer: Enable live meters | Show the 5-hour and weekly limits (asks first) |
+| Complementer: Refresh limits | Update the limits now (also the ↻ icon next to Usage). Resumes the followed session in a short `claude` terminal, sends "hi", then exits and closes it |
 | Complementer: Disable live meters | Restore your original status line |
 | Complementer: New Claude session | Start a new chat |
 | Complementer: Dock panel beside Claude chat | Move the panel next to the Claude chat |

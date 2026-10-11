@@ -12,7 +12,7 @@ Specs and roadmap: `docs/superpowers/specs/complementer-design.md` (what is buil
 
 ```
 npm run build   # clean, tsc (src + test), tsc (webview script), copy hook.sh / panel.html / panel.css into out/
-npm test        # builds, then node:test on out/test, 87 tests; must pass
+npm test        # builds, then node:test on out/test, 99 tests; must pass
 npm run build && node --test out/test/logs.test.js   # one test file (add --test-name-pattern="..." for one test)
 npm run lint    # ESLint (also enforces naming and const/let)
 npm run check   # tsc --noEmit over two projects: src + test, and src/views/panel.ts (the webview script, with DOM types)
@@ -30,9 +30,10 @@ src/consts.ts           Every module-level constant (hook.ts and views/panel.ts 
 src/view-model.ts       Pure functions: which session is shown, meters, insights, panel state, formatters. No vscode, no I/O.
 src/logs.ts             parseUsageLine, iterateLineBatches, readNewRecords, History (totals + offsets, one atomic file), Scanner
 src/breakdown.ts        createSessionTally, addEntry, readSessionTally: sizes of what fills the shown session's context (in memory, names and sizes only)
-src/skills.ts           parseSkillUses, SkillHistory: per-day skill call counts in skills.json (own file and offsets)
+src/skills.ts           parseSkillUses, SkillHistory: per-day and per-session skill call counts in skills.json (own file and offsets; v2, v1 is migrated)
 src/chats.ts            ChatIndex, renderTranscript, getSessionPaths (everything Claude keeps per session)
 src/live.ts             parsePayload, pickSessions, isWithin, effectiveLimit, LiveFeed; also parseAccount / readAccount from ~/.claude.json (display fields only) (watches live/<sessionId>.json)
+src/usage.ts            queryUsage, parseUsageOutput: plan limits from the user's own `claude` via the `get_usage` control request (undocumented; the ↻ button is the fallback)
 src/setup.ts            planEnable / enableStatusLine / disableStatusLine: chains the user's statusLine through the hook
 src/uninstall.ts        vscode:uninstall script: restores the user's statusLine
 src/utils.ts            Shared helpers: non-throwing file and JSON reads (tryReadText, tryParseJson), small pure functions
@@ -56,8 +57,10 @@ test/                   *.test.ts plus helpers.ts; extension.test.ts runs the re
 ## Domain facts that bite
 
 - One API response is logged **once per content block** with the same `message.id`, and the blocks can carry different `output_tokens`. Keep the largest and add only the difference (`History.addRecord`). Summing or keeping the first is wrong by double digits.
-- Plan limits (5-hour, weekly) are account-wide and only available through the statusLine payload (`rate_limits`). Context % needs the model's window size, learned from live payloads into `windows.json`; with no known size, show nothing (never guess).
+- Plan limits (5-hour, weekly) are account-wide. Two sources: the statusLine payload (`rate_limits`, terminal sessions only, and only after a first reply), and `queryUsage` (src/usage.ts), which starts the official extension's own `claude` binary and sends the `get_usage` control request, as the official panel does; it sends no message and logs no session. The chat panel never runs the statusLine. Context % needs the model's window size, learned from live payloads into `windows.json`; with no known size, show nothing (never guess).
 - Token totals are anonymous aggregates and are kept when a session is deleted. Chat content is never stored.
+- The panel's **Refresh** button (the ↻ icon at the right of the Usage heading) must resume the *followed* session, not a throwaway one: it opens a terminal in that session's folder, runs `claude --resume <session id>`, sends "hi", waits for the limits, runs `/exit` and closes the terminal (`refreshLimits` in `extension.ts`). The resumed session reports a live payload, which is the only thing that feeds the Context meter and breakdown bar (the chat panel never runs the statusLine), so a Context bar missing for a chat-panel-only session is expected until Refresh. Only when no session is followed does it start a fresh `--session-id` helper (in `activationSessionIds`, never followed). The background `queryUsage` timer is separate and feeds limits only. Refresh only counts a live payload written after it started (resumed sessions keep old payloads for days), runs one at a time, and asks first when the chat changed in the last minute (it may be open in the chat panel).
+- Skill counts are saved per day (Insights "Top Skills", do not change it) and per session id (`skills.json` v2, `sessions`), which feeds the "skills ×N" line on each chat row; the followed session's "Skills used" under Details is still tallied in memory from its log. A v1 file keeps its day counts and gets a one-off sessions-only backfill (`needsSessionBackfill`).
 - `claude-vscode.newConversation` only pings an already-open chat; use `claude-vscode.primaryEditor.open` (optionally with a session id).
 - `getSessionPaths` is the only place that decides what a delete touches; it refuses anything that is not a UUID-named log inside `~/.claude/projects`. Delete moves to the Trash by default (`useTrash: true`); the row's ✕ button deletes for good (`useTrash: false`) behind its own confirmation, and one answer never confirms the other. Both go through `getSessionPaths`.
 - Skills are counted from assistant `tool_use` blocks named `Skill` only. Typed `/name` commands cannot be told from built-ins (`/clear`, `/model`), so they are not counted. Names from logs pass `NAME_PATTERN` before they are counted or shown.
@@ -65,7 +68,7 @@ test/                   *.test.ts plus helpers.ts; extension.test.ts runs the re
 
 ## Don't
 
-- Don't patch or edit files of the official Claude Code extension, call undocumented endpoints, or read credentials/tokens. Reading `~/.claude.json` is limited to the `oauthAccount` display fields.
+- Don't patch or edit files of the official Claude Code extension, call undocumented endpoints, or read credentials/tokens. The one deliberate exception is `src/usage.ts`: it runs the installed `claude` binary and sends it the undocumented `get_usage` control request (no network call or credential read of our own). Every failure must leave the panel working, with the ↻ button still refreshing; do not widen this to other requests. Reading `~/.claude.json` is limited to the `oauthAccount` display fields.
 - Don't add a pricing table or cost estimates, a backend, telemetry, or network calls.
 - Don't add dependencies for a few lines of code. Runtime has none; dev dependencies are ESLint (with typescript-eslint), TypeScript and the type packages.
 - Don't commit `.vsix` files, `out/`, `node_modules`, or anything from `~/.claude`.

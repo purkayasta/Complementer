@@ -51,7 +51,7 @@ Companion to `../specs/complementer-design.md`, which describes what is built. v
 | # | Task | Done when | Status |
 |---|---|---|---|
 | 1 | A `breakdown` module over the session log (reads via `iterateLineBatches`; pure computation in the view model), with tests on fixtures | Parts sum to the measured context within a stated tolerance | Done |
-| 2 | Breakdown inside Usage for the selected session: a full-width stacked bar under the Context meter, with the list and top items under a collapsed "Details" | Matches `/context` for a manual check in a real session | Built; manual check against `/context` still to do |
+| 2 | Breakdown inside Usage for the selected session: a full-width stacked bar under the Context meter (colour-keyed legend; token counts rounded, one decimal for k/M/B), with the list and top items under a collapsed "Details" | Matches `/context` for a manual check in a real session | Built; manual check against `/context` still to do |
 | 3 | Top offenders: largest tool results and files read, with the turn they came from | Each item shows size and turn | Done |
 
 Skills used (per session, in Details) and Top skills (Insights) were added to v2; see `../specs/2026-10-11-context-breakdown-and-skills-design.md`.

@@ -31,7 +31,7 @@ npm run check    # type-check: src + test, and the webview script
 npm run package  # lint, check, test, then build release/*.vsix
 ```
 
-Press `F5` to run the extension in a development host.
+Press `F5` to run the extension in a development host. To release, see [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## Testing
 

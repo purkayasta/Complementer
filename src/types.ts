@@ -127,9 +127,14 @@ export interface Breakdown {
 /** Day (YYYY-MM-DD, local) -> skill name -> times called. */
 export type SkillDays = Record<string, Record<string, number>>;
 
+/** Skill call counts per session id (kept after the chat is deleted, like the day counts). */
+export type SkillSessions = Record<string, Record<string, number>>;
+
 /** How far a log file has been read for skill calls. */
 export interface SkillFileState {
   offset: number;
+  /** Set when a version 1 file is loaded: the bytes before `offset` are read once more for the per-session counts only (the day counts already have them). */
+  needsSessionBackfill?: boolean;
 }
 
 // ---- chats ----
@@ -280,6 +285,8 @@ export interface PanelChat {
   isInWorkspace: boolean;
   modifiedAtMs: number;
   context?: { percent: number };
+  /** The chat's most used skills, most used first. */
+  skills?: NamedAmount[];
 }
 
 export interface PanelUsage {
@@ -292,6 +299,8 @@ export interface PanelUsage {
   breakdown?: Breakdown;
   /** [skill, times called] pairs of the shown session, most used first; empty when none. */
   skills?: NamedAmount[];
+  /** When the 5-hour and weekly numbers were last received (epoch ms); undefined when there are none. */
+  limitsUpdatedAtMs?: number;
   isStale: boolean;
   isLiveOff: boolean;
   note: string;
@@ -307,7 +316,7 @@ export interface PanelState {
 
 /** What the panel's script posts back to the extension. */
 export interface PanelMessage {
-  type: 'ready' | 'new' | 'select' | 'enable' | 'open' | 'read' | 'delete' | 'deletePermanently';
+  type: 'ready' | 'new' | 'select' | 'enable' | 'refreshLimits' | 'open' | 'read' | 'delete' | 'deletePermanently';
   /** A session id. */
   id?: string | null;
 }

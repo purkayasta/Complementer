@@ -27,6 +27,7 @@ test("SkillHistory counts per day, skips another session's replies, reads only n
   const history = new SkillHistory(path.join(directory, 'skills.json'));
   assert.strictEqual(await history.scan([logPath]), true);
   assert.deepStrictEqual(history.days, { [DAY]: { 'code-review': 1, constructor: 1 } }); // the resumed chat's reply is counted in its own log
+  assert.deepStrictEqual(history.sessions, { 'sess-own': { 'code-review': 1, constructor: 1 } });
   assert.strictEqual(await history.scan([logPath]), false);
   await fsPromises.appendFile(logPath, buildSkillLine('code-review', { sessionId: 'sess-own' }) + '\n');
   assert.strictEqual(await history.scan([logPath]), true);
@@ -35,6 +36,7 @@ test("SkillHistory counts per day, skips another session's replies, reads only n
   await history.save();
   const reloaded = await SkillHistory.load(path.join(directory, 'skills.json'));
   assert.deepStrictEqual(reloaded.days, history.days);
+  assert.deepStrictEqual(reloaded.sessions, history.sessions);
   assert.strictEqual(await reloaded.scan([logPath]), false); // offsets were saved, so nothing is counted twice
 });
 
@@ -46,6 +48,24 @@ test('a skills file of another version is set aside and rebuilt from the logs', 
   assert.deepStrictEqual(history.days, {});
   await fsPromises.access(filePath + '.bad');
   assert.strictEqual((await SkillHistory.load(path.join(directory, 'missing.json'))).hasUnsavedChanges, false); // no file: a fresh one
+});
+
+test('a version 1 skills file keeps its day counts and gets the per-session counts from the logs, once', async () => {
+  const directory = await createTemporaryDirectory();
+  const logPath = path.join(directory, 'sess-own.jsonl');
+  const filePath = path.join(directory, 'skills.json');
+  await writeTextFile(logPath, buildSkillLine('code-review', { sessionId: 'sess-own' }) + '\n');
+  const { size } = await fsPromises.stat(logPath);
+  await fsPromises.appendFile(logPath, buildSkillLine('late', { sessionId: 'sess-own' }) + '\n'); // not read by version 1 yet
+  await writeTextFile(filePath, JSON.stringify({ version: 1, days: { [DAY]: { 'code-review': 1, deletedChat: 4 } }, fileStates: { [logPath]: { offset: size } } }));
+  const history = await SkillHistory.load(filePath);
+  assert.strictEqual(await history.scan([logPath]), true);
+  assert.deepStrictEqual(history.sessions, { 'sess-own': { 'code-review': 1, late: 1 } });
+  assert.deepStrictEqual(history.days, { [DAY]: { 'code-review': 1, deletedChat: 4, late: 1 } }); // the backfill never touches the days
+  await history.save();
+  const reloaded = await SkillHistory.load(filePath);
+  assert.strictEqual(await reloaded.scan([logPath]), false);
+  assert.deepStrictEqual(reloaded.sessions, history.sessions);
 });
 
 test('an unchanged history does not rewrite its file', async () => {

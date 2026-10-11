@@ -3,8 +3,8 @@
 import path from 'node:path';
 import { pickSessions, isWithin, effectiveLimit, isStale } from './live';
 import { toDayKey } from './logs';
-import type { Account, Bucket, Breakdown, SessionTally, SkillDays, Chat, HistoryDays, Insights, DayInsight, LiveState, MeterView, Meters, NamedAmount, PanelState, PanelTemplateValues, RangeInsight, TokenTotals, WindowState } from './types';
-import { CHAT_INDEX_THROTTLE_MS, LARGE_LOG_BYTES, LARGE_LOG_THROTTLE_MS, INSIGHT_DAYS, INSIGHT_RANGES, TOP_PROJECTS_PER_DAY, TOP_ENTRIES_PER_RANGE, TOP_TOOLS, TOP_SKILLS_PER_SESSION, CONTENT_KINDS } from './consts';
+import type { Account, Bucket, Breakdown, SessionTally, SkillDays, SkillSessions, Chat, HistoryDays, Insights, DayInsight, LiveState, MeterView, Meters, NamedAmount, PanelState, PanelTemplateValues, RangeInsight, TokenTotals, WindowState } from './types';
+import { CHAT_INDEX_THROTTLE_MS, LARGE_LOG_BYTES, LARGE_LOG_THROTTLE_MS, INSIGHT_DAYS, INSIGHT_RANGES, TOP_PROJECTS_PER_DAY, TOP_ENTRIES_PER_RANGE, TOP_TOOLS, TOP_SKILLS_PER_CHAT, TOP_SKILLS_PER_SESSION, CONTENT_KINDS } from './consts';
 
 /**
  * How long to wait before re-indexing chats.
@@ -16,7 +16,7 @@ export function formatTokens(tokens: number) {
   if (tokens >= 1e9) return (tokens / 1e9).toFixed(1) + 'B';
   if (tokens >= 1e6) return (tokens / 1e6).toFixed(1) + 'M';
   if (tokens >= 1e3) return (tokens / 1e3).toFixed(1) + 'k';
-  return String(tokens);
+  return String(Math.round(tokens));
 }
 
 export const formatPercent = (percent: number) => Math.round(percent) + '%';
@@ -44,18 +44,20 @@ export function contextFromTokens(contextTokens: number | undefined, modelId: st
 }
 
 /** Decide which session is shown (the pinned one, else the latest in this workspace) and what its meters read. */
-export function computeMeters({ liveStates, chats, workspaceFolders, selectedSessionId, windowSizes, nowMs }: {
+export function computeMeters({ liveStates, chats, workspaceFolders, selectedSessionId, windowSizes, nowMs, ignoredSessionIds }: {
   liveStates: LiveState[];
   chats: Chat[];
   workspaceFolders: string[];
   selectedSessionId: string | undefined;
   windowSizes: Record<string, number>;
   nowMs: number;
+  /** Sessions never followed automatically (the Activate helper), though their limits still count. */
+  ignoredSessionIds?: ReadonlySet<string>;
 }): Meters {
-  const { contextSession: automaticSession, limitsSession } = pickSessions(liveStates, workspaceFolders);
+  const { contextSession: automaticSession, limitsSession } = pickSessions(liveStates, workspaceFolders, ignoredSessionIds);
   const selectedChat = selectedSessionId ? chats.find((chat) => chat.id === selectedSessionId) : undefined;
   const liveSession = selectedChat ? liveStates.find((state) => state.sessionId === selectedChat.id) : automaticSession;
-  const chat = selectedChat ?? findAutomaticChat(chats, liveSession, workspaceFolders);
+  const chat = selectedChat ?? findAutomaticChat(chats.filter((candidate) => !ignoredSessionIds?.has(candidate.id)), liveSession, workspaceFolders);
   const derived = liveSession?.contextPercent === undefined ? contextFromTokens(chat?.contextTokens, chat?.modelId, windowSizes) : undefined;
   const newestStatus = liveSession ?? limitsSession;
   return {
@@ -97,6 +99,12 @@ function topByName(namedAmounts: NamedAmount[], limit: number): NamedAmount[] {
   return Object.entries(namedAmounts.reduce(addToTotals, {}))
     .sort((first, second) => second[1] - first[1])
     .slice(0, limit);
+}
+
+/** A chat's top skills for its list row; undefined when it called none. */
+function topChatSkills(skillCounts: Record<string, number> | undefined): NamedAmount[] | undefined {
+  const top = topByName(Object.entries(skillCounts ?? {}), TOP_SKILLS_PER_CHAT);
+  return top.length ? top : undefined;
 }
 
 /** A session's skills, most used first. */
@@ -201,13 +209,15 @@ function toLimitView(windowState: WindowState | undefined, resetsAtEpochSeconds:
   };
 }
 
-function statusNote(meters: Meters, hasLiveFeed: boolean): string {
-  if (!hasLiveFeed) return 'Live meters are off. Click to enable exact values.';
-  return meters.isStale ? 'Stale: send a message in Claude Code to refresh.' : '';
+function statusNote(meters: Meters, hasLiveFeed: boolean, hasLiveData: boolean): string {
+  if (!hasLiveFeed && !meters.fiveHour) return 'Live meters are off. Click to enable exact values.';
+  // Claude Code's chat panel never runs the status line, so only terminal sessions fill the meters.
+  if (!hasLiveData) return 'Limits need a Claude terminal session. Press ↻ to start one briefly (a few tokens).';
+  return meters.isStale ? 'Stale: press ↻ to refresh.' : '';
 }
 
 /** Everything the Sessions panel draws. */
-export function buildPanelState({ meters, account, liveStates, isLiveEnabled, chats, workspaceFolders, windowSizes, insights, selectedSessionId, nowMs, breakdown, sessionSkills = [] }: {
+export function buildPanelState({ meters, account, liveStates, isLiveEnabled, chats, workspaceFolders, windowSizes, insights, selectedSessionId, nowMs, breakdown, sessionSkills = [], skillSessions = {} }: {
   meters: Meters;
   account: Account | undefined;
   liveStates: LiveState[];
@@ -222,12 +232,14 @@ export function buildPanelState({ meters, account, liveStates, isLiveEnabled, ch
   breakdown?: Breakdown;
   /** [skill, times called] pairs of the shown session, most used first. */
   sessionSkills?: NamedAmount[];
+  /** Saved skill counts of every session, for the chat list. */
+  skillSessions?: SkillSessions;
 }): PanelState {
   const liveBySessionId = new Map(liveStates.map((state) => [state.sessionId, state]));
   const panelChats = chats
     .map((chat) => {
       const percent = liveBySessionId.get(chat.id)?.contextPercent ?? contextFromTokens(chat.contextTokens, chat.modelId, windowSizes)?.percent;
-      return { id: chat.id, title: chat.title, projectName: chat.workingDirectory ? projectName(chat.workingDirectory) : '', projectPath: chat.workingDirectory, isInWorkspace: workspaceFolders.some((folder) => isWithin(chat.workingDirectory, folder)), modifiedAtMs: chat.modifiedAtMs, context: percent === undefined ? undefined : { percent } };
+      return { id: chat.id, title: chat.title, projectName: chat.workingDirectory ? projectName(chat.workingDirectory) : '', projectPath: chat.workingDirectory, isInWorkspace: workspaceFolders.some((folder) => isWithin(chat.workingDirectory, folder)), modifiedAtMs: chat.modifiedAtMs, context: percent === undefined ? undefined : { percent }, skills: topChatSkills(skillSessions[chat.id]) };
     })
     .sort((first, second) => second.modifiedAtMs - first.modifiedAtMs);
   const hasLiveFeed = isLiveEnabled ?? liveStates.length > 0;
@@ -248,9 +260,10 @@ export function buildPanelState({ meters, account, liveStates, isLiveEnabled, ch
       costLabel: meters.liveSession?.costUsd === undefined ? undefined : formatUsd(meters.liveSession.costUsd),
       breakdown,
       skills: sessionSkills.length ? sessionSkills : undefined,
+      limitsUpdatedAtMs: meters.limitsSession?.updatedAt,
       isStale: meters.isStale,
       isLiveOff: !hasLiveFeed,
-      note: statusNote(meters, hasLiveFeed),
+      note: statusNote(meters, hasLiveFeed, liveStates.length > 0),
     },
     chats: panelChats,
     insights,

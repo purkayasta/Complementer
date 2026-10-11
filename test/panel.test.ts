@@ -211,6 +211,13 @@ test('panel shows empty states without crashing', async () => {
   assert.strictEqual(elementsById['usage-note'].textContent, 'Live meters are off.');
 });
 
+test('the ↻ icon next to Usage asks the extension to refresh the limits', async () => {
+  const { elementsById, postedMessages, sendState } = await loadPanel();
+  sendState(STATE);
+  elementsById['refresh-usage'].listeners.click();
+  assert.deepStrictEqual(postedMessages.at(-1), { type: 'refreshLimits' });
+});
+
 test('context breakdown: a bar and legend by default, details on demand, log names only as text', async () => {
   const { elementsById, sendState } = await loadPanel();
   sendState({ ...STATE, usage: { ...STATE.usage, breakdown: BREAKDOWN, skills: [['code-review', 8], ['docs-graph', 4]] } });
@@ -219,13 +226,13 @@ test('context breakdown: a bar and legend by default, details on demand, log nam
   const segmentWidths = findAll(meters, hasClass('breakdown-segment')).map((segment) => parseFloat(segment.styleProperties.width));
   assert.strictEqual(segmentWidths.reduce((sum, width) => sum + width, 0), 100); // the bar is the whole used context, however full the window is
   assert.deepStrictEqual(findAll(meters, hasClass('breakdown-stack'))[0].styleProperties, {}); // full width: no width of its own
-  assert.match(findAll(meters, hasClass('breakdown-legend'))[0].textContent, /Baseline 1\.0k · Tool results ~450 · Assistant text ~150/);
+  assert.deepEqual(findAll(meters, hasClass('legend-item')).map((item) => item.textContent), ['Baseline 1.0k', 'Tool results ~450', 'Assistant text ~150']);
   assert.strictEqual(findAll(meters, hasClass('details')).length, 0); // collapsed by default
   findAll(meters, hasClass('details-toggle'))[0].listeners.click();
   const details = findAll(meters, hasClass('details'))[0];
   assert.match(details.textContent, /Baseline \(fixed\)1\.0k/);
   assert.match(details.textContent, /Read~300/); // per-tool subtotal
-  assert.match(details.textContent, /Biggest items/);
+  assert.match(details.textContent, /Biggest tool outputs/);
   assert.match(details.textContent, /turn 3/);
   assert.match(details.textContent, /Skills used/);
   assert.match(details.textContent, /code-review×8/);

@@ -2,7 +2,7 @@
 // offsets) so the token history is never touched. Names and counts only: no chat content.
 import { promises as fsPromises } from 'node:fs';
 import path from 'node:path';
-import type { SkillDays, SkillFileState } from './types';
+import type { SkillDays, SkillSessions, SkillFileState } from './types';
 import { SKILL_CALL_NEEDLE, SKILLS_VERSION, NAME_PATTERN } from './consts';
 import { getOwnSessionId, iterateLineBatches, toDayKey } from './logs';
 import { tryParseJson, tryReadText, incrementCount } from './utils';
@@ -25,6 +25,8 @@ export function parseSkillUses(line: string): { day: string; sessionId: string; 
 export class SkillHistory {
   days: SkillDays = {};
 
+  sessions: SkillSessions = {};
+
   fileStates: Record<string, SkillFileState> = {};
 
   hasUnsavedChanges = false;
@@ -41,9 +43,15 @@ export class SkillHistory {
     const text = await tryReadText(filePath);
     if (text === undefined) return history;
     const saved = tryParseJson(text);
-    if (saved?.version === SKILLS_VERSION && saved.days && saved.fileStates) {
+    if (saved?.version === SKILLS_VERSION && saved.days && saved.fileStates && saved.sessions) {
       history.days = saved.days;
+      history.sessions = saved.sessions;
       history.fileStates = saved.fileStates;
+    } else if (saved?.version === 1 && saved.days && saved.fileStates) {
+      // Version 1 had no per-session counts: keep the day counts and read each log once more for the sessions only.
+      history.days = saved.days;
+      history.fileStates = Object.fromEntries(Object.entries<SkillFileState>(saved.fileStates).map(([logPath, fileState]) => [logPath, { ...fileState, needsSessionBackfill: true }]));
+      history.hasUnsavedChanges = true;
     } else {
       await fsPromises.rename(filePath, filePath + '.bad').catch(() => {});
     }
@@ -68,10 +76,11 @@ export class SkillHistory {
 
   async #scanFile(filePath: string): Promise<boolean> {
     const fileState = (this.fileStates[filePath] ||= { offset: 0 });
-    const offsetBefore = fileState.offset;
     const ownSessionId = getOwnSessionId(filePath);
     try {
       const { size: fileSize } = await fsPromises.stat(filePath);
+      if (fileState.needsSessionBackfill) await this.#backfillSessions(filePath, fileState, ownSessionId, fileSize);
+      const offsetBefore = fileState.offset;
       if (fileSize < fileState.offset) fileState.offset = 0; // truncated or replaced: start over
       if (fileSize === fileState.offset) return false;
       for await (const lines of iterateLineBatches(filePath, fileState)) {
@@ -79,20 +88,41 @@ export class SkillHistory {
           if (!line.includes(SKILL_CALL_NEEDLE)) continue;
           const uses = parseSkillUses(line.toString('utf8'));
           // A resumed or forked chat carries another session's replies; they are counted in their own log.
-          if (uses && (!uses.sessionId || uses.sessionId === ownSessionId)) this.#addUses(uses.day, uses.skills);
+          if (uses && (!uses.sessionId || uses.sessionId === ownSessionId)) this.#addUses(uses.day, uses.skills, ownSessionId);
         }
       }
+      const hadNewData = fileState.offset !== offsetBefore;
+      if (hadNewData) this.hasUnsavedChanges = true; // offsets are saved too, or the next start would count the same calls again
+      return hadNewData;
     } catch {
       return false; // the file vanished between listing and reading
     }
-    const hadNewData = fileState.offset !== offsetBefore;
-    if (hadNewData) this.hasUnsavedChanges = true; // offsets are saved too, or the next start would count the same calls again
-    return hadNewData;
   }
 
-  #addUses(day: string, skills: string[]) {
-    const counts = (this.days[day] ||= {});
-    for (const skill of skills) incrementCount(counts, skill);
+  /** Version 1 migration: count the already-read bytes (before fileState.offset) into the sessions only. */
+  async #backfillSessions(filePath: string, fileState: SkillFileState, ownSessionId: string, fileSize: number) {
+    delete fileState.needsSessionBackfill;
+    this.hasUnsavedChanges = true;
+    if (fileSize < fileState.offset) return; // replaced since: the normal scan starts it over
+    const cursor = { offset: 0 };
+    for await (const lines of iterateLineBatches(filePath, cursor)) {
+      let lineEnd = cursor.offset; // the cursor moves only after the batch is handled
+      for (const line of lines) {
+        lineEnd += line.length + 1;
+        if (lineEnd > fileState.offset) return; // from here on the day counts have not read it either
+        if (!line.includes(SKILL_CALL_NEEDLE)) continue;
+        const uses = parseSkillUses(line.toString('utf8'));
+        if (uses && (!uses.sessionId || uses.sessionId === ownSessionId)) this.#addUses(uses.day, uses.skills, ownSessionId, false);
+      }
+    }
+  }
+
+  #addUses(day: string, skills: string[], sessionId: string, countDay = true) {
+    const sessionCounts = (this.sessions[sessionId] ||= {});
+    for (const skill of skills) incrementCount(sessionCounts, skill);
+    if (!countDay) return;
+    const dayCounts = (this.days[day] ||= {});
+    for (const skill of skills) incrementCount(dayCounts, skill);
   }
 
   /** Saves run one after another: two writers on the same temporary file could leave a half-written file. */
@@ -108,7 +138,7 @@ export class SkillHistory {
     const temporaryPath = this.filePath + '.tmp';
     try {
       await fsPromises.mkdir(path.dirname(this.filePath), { recursive: true });
-      await fsPromises.writeFile(temporaryPath, JSON.stringify({ version: SKILLS_VERSION, days: this.days, fileStates: this.fileStates }));
+      await fsPromises.writeFile(temporaryPath, JSON.stringify({ version: SKILLS_VERSION, days: this.days, sessions: this.sessions, fileStates: this.fileStates }));
       await fsPromises.rename(temporaryPath, this.filePath);
     } catch (error) {
       this.hasUnsavedChanges = true; // retry on the next flush

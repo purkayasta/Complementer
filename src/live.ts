@@ -54,11 +54,11 @@ function newerSession(newest: LiveState | undefined, candidate: LiveState): Live
   return !newest || candidate.updatedAt > newest.updatedAt ? candidate : newest;
 }
 
-/** Context comes from the session in this workspace; plan limits are account-wide, so any newest payload will do. */
-export function pickSessions(states: Iterable<LiveState>, workspaceFolders: string[]): { contextSession: LiveState | undefined; limitsSession: LiveState | undefined } {
+/** Context comes from the session in this workspace; plan limits are account-wide, so any newest payload will do. Ignored sessions (the Activate helper) still count for limits. */
+export function pickSessions(states: Iterable<LiveState>, workspaceFolders: string[], ignoredSessionIds: ReadonlySet<string> = new Set()): { contextSession: LiveState | undefined; limitsSession: LiveState | undefined } {
   const allStates = [...states];
   return {
-    contextSession: allStates.filter((state) => workspaceFolders.some((folder) => isWithin(state.workingDirectory, folder))).reduce(newerSession, undefined),
+    contextSession: allStates.filter((state) => !ignoredSessionIds.has(state.sessionId)).filter((state) => workspaceFolders.some((folder) => isWithin(state.workingDirectory, folder))).reduce(newerSession, undefined),
     limitsSession: allStates.filter((state) => state.fiveHourLimit || state.weeklyLimit).reduce(newerSession, undefined),
   };
 }

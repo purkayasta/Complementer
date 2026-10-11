@@ -124,7 +124,10 @@ test('buildPanelState: chat rows carry their own context percent, newest first',
     insights: viewModel.computeInsights({}, new Date(NOW_MS)),
     selectedSessionId: undefined,
     nowMs: NOW_MS,
+    skillSessions: { a: { brainstorming: 3, 'code-review': 1, 'writing-plans': 2 } },
   });
+  assert.deepStrictEqual(state.chats.find((row) => row.id === 'a')?.skills, [['brainstorming', 3], ['writing-plans', 2]]); // top two
+  assert.strictEqual(state.chats.find((row) => row.id === 'old')?.skills, undefined);
   assert.deepStrictEqual(state.chats.map((row) => row.id).sort(), ['a', 'fresh', 'old']);
   assert.strictEqual(state.chats.find((row) => row.id === 'fresh')?.projectName, ''); // no folder recorded yet: ungrouped
   assert.deepStrictEqual(state.chats.map((row) => [row.id, row.isInWorkspace]).sort(), [['a', true], ['fresh', false], ['old', true]]); // 'fresh' has no folder yet
@@ -160,6 +163,22 @@ test('buildPanelState: live meters read as off when the hook is not in statusLin
   assert.match(build(false).note, /Live meters are off/);
   assert.strictEqual(build(true).isLiveOff, false);
   assert.strictEqual(build(undefined).isLiveOff, false); // unknown: the live files decide
+});
+
+test('buildPanelState: live on but no payload yet says it is waiting and that only terminal sessions report', () => {
+  const { note } = viewModel.buildPanelState({
+    meters: viewModel.computeMeters({ liveStates: [], chats: [], workspaceFolders: [], selectedSessionId: undefined, windowSizes: WINDOW_SIZES, nowMs: NOW_MS }),
+    account: undefined,
+    liveStates: [],
+    isLiveEnabled: true,
+    chats: [],
+    workspaceFolders: [],
+    windowSizes: WINDOW_SIZES,
+    insights: viewModel.computeInsights({}, new Date(NOW_MS)),
+    selectedSessionId: undefined,
+    nowMs: NOW_MS,
+  }).usage;
+  assert.match(note, /terminal session.*↻/);
 });
 
 test('computeBreakdown: parts add up to the growth, tools and biggest items are scaled the same way, unknowns show nothing', () => {
@@ -222,4 +241,13 @@ test('names that match object internals (constructor, toString) are counted like
   assert.deepStrictEqual(viewModel.topSessionSkills({ constructor: 2, toString: 1 }), [['constructor', 2], ['toString', 1]]);
   const insights = viewModel.computeInsights({}, new Date('2026-10-11T12:00:00'), { '2026-10-11': { constructor: 3 }, '2026-10-10': { constructor: 1 } });
   assert.deepStrictEqual(insights.ranges[7].skills, [['constructor', 4]]);
+});
+
+test('computeMeters: the Activate helper session feeds the limits but is never the session that is followed', () => {
+  const helper = { ...liveState('helper'), workingDirectory: '/work/app', updatedAt: NOW_MS, fiveHourLimit: { percent: 10 }, weeklyLimit: { percent: 31 } };
+  const ownChat = { id: 'mine', title: 'Mine', filePath: '/log/mine.jsonl', workingDirectory: '/work/app', modifiedAtMs: NOW_MS - 1000, modelId: 'm', contextTokens: 100 } as Chat;
+  const meters = viewModel.computeMeters({ liveStates: [helper], chats: [ownChat], workspaceFolders: ['/work/app'], selectedSessionId: undefined, windowSizes: { m: 1000 }, nowMs: NOW_MS, ignoredSessionIds: new Set(['helper']) });
+  assert.strictEqual(meters.chat?.id, 'mine');
+  assert.strictEqual(meters.fiveHour?.percent, 10);
+  assert.strictEqual(meters.contextPercent, 10);
 });

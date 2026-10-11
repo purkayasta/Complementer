@@ -6,6 +6,7 @@ import Module from 'node:module';
 import path from 'node:path';
 import { createTemporaryDirectory, writeTextFile, buildAssistantLine, buildSkillLine } from './helpers';
 import { pathExists } from '../src/utils';
+import { buildHookCommand } from '../src/setup';
 import type { PanelState } from '../src/types';
 
 const KEEPER_ID = '99999999-2222-3333-4444-555555555555';
@@ -22,13 +23,15 @@ interface Recorded {
   /** What the next warning dialogs return, in order. */
   warningAnswers: (string | undefined)[];
   infoMessages: string[];
+  /** Each terminal the extension opened, with what it typed into it and whether it was closed. */
+  terminals: { sent: string[]; isDisposed: boolean }[];
   /** Registered webview view providers by id. */
   providers: Record<string, any>;
   /** The Trash call (0-based) at which the stub starts failing; Infinity for never. */
   failTrashAfter: number;
 }
 
-const recorded: Recorded = { executedCommands: [], trashed: [], warningAnswers: [], infoMessages: [], providers: {}, failTrashAfter: Infinity };
+const recorded: Recorded = { executedCommands: [], trashed: [], warningAnswers: [], infoMessages: [], terminals: [], providers: {}, failTrashAfter: Infinity };
 
 const vscodeStub = {
   StatusBarAlignment: { Right: 2 },
@@ -47,6 +50,11 @@ const vscodeStub = {
     showWarningMessage: async () => recorded.warningAnswers.shift(),
     showInformationMessage: async (message: string) => recorded.infoMessages.push(message),
     showErrorMessage: async () => undefined,
+    createTerminal: () => {
+      const terminal = { sent: [] as string[], isDisposed: false };
+      recorded.terminals.push(terminal);
+      return { show() {}, sendText: (text: string) => terminal.sent.push(text), dispose: () => (terminal.isDisposed = true) };
+    },
   },
   workspace: {
     workspaceFolders: [{ uri: { fsPath: '/p/a' } }], // the fixture chats ran in /p/a
@@ -109,8 +117,10 @@ function createFakeContext(storage: string): any {
 }
 
 /** Load and start the extension against a fake home; returns a handle to the panel. */
-async function startExtension(hasDuplicateKeeper = false) {
+async function startExtension(hasDuplicateKeeper = false, isLiveOn = false) {
   const { home, storage, claude } = await createFakeHome(hasDuplicateKeeper);
+  const setupPaths = { settingsPath: path.join(claude, 'settings.json'), storageDirectory: storage, sourceDirectory: path.join(__dirname, '..', 'src') };
+  if (isLiveOn) await writeTextFile(setupPaths.settingsPath, JSON.stringify({ statusLine: { type: 'command', command: buildHookCommand(setupPaths) } })); // the Refresh button needs live meters on
   process.env.HOME = home;
   // `vscode` only exists inside VS Code, so the module loader is told to answer it with the stub. Node has no public
   // API for this in CommonJS, hence the internal hook.
@@ -269,4 +279,63 @@ test('the pinned session lists its skills, and skills.json keeps the per-day tot
   }
   const saved = JSON.parse(await fsPromises.readFile(skillsPath, 'utf8'));
   assert.deepStrictEqual(Object.values(saved.days), [{ 'code-review': 1 }]); // the Keeper's only skill call, counted once
+});
+
+test('a live payload that arrives while the panel is open shows the limits without switching sessions', async (testContext) => {
+  const { storage, postedStates, dispose } = await startExtension();
+  testContext.after(dispose);
+  assert.strictEqual(latestState(postedStates).usage.fiveHour, undefined);
+  const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+  await writeTextFile(path.join(storage, 'live', 'fresh.json'), JSON.stringify({ session_id: 'fresh', cwd: '/elsewhere', model: { id: 'claude-sonnet-5-5' }, context_window: { context_window_size: 1000000 }, rate_limits: { five_hour: { used_percentage: 10, resets_at: resetsAt }, seven_day: { used_percentage: 31, resets_at: resetsAt } } }));
+  await waitUntil(() => latestState(postedStates).usage.fiveHour !== undefined);
+  assert.strictEqual(latestState(postedStates).usage.weekly?.label, '31%');
+});
+
+/** A live payload for a session, written `ageMs` ago, optionally with plan limits. */
+async function writeSessionPayload(storage: string, sessionId: string, { ageMs = 0, hasLimits = false } = {}) {
+  const filePath = path.join(storage, 'live', `${sessionId}.json`);
+  const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+  const limits = hasLimits ? { rate_limits: { five_hour: { used_percentage: 10, resets_at: resetsAt }, seven_day: { used_percentage: 31, resets_at: resetsAt } } } : {};
+  await writeTextFile(filePath, JSON.stringify({ session_id: sessionId, cwd: '/p/a', model: { id: 'claude-sonnet-5-5' }, context_window: { context_window_size: 1000000 }, ...limits }));
+  const time = new Date(Date.now() - ageMs);
+  await fsPromises.utimes(filePath, time, time);
+}
+
+test('Refresh resumes the followed chat and ignores an old payload of that chat: "hi" and /exit wait for new ones', async (testContext) => {
+  const { storage, send, dispose } = await startExtension(false, true);
+  testContext.after(dispose);
+  await writeSessionPayload(storage, KEEPER_ID, { ageMs: 3600_000, hasLimits: true }); // from an earlier terminal run
+  send({ type: 'select', id: KEEPER_ID });
+  recorded.terminals.length = 0;
+  recorded.warningAnswers.push('Resume anyway'); // the fixture chat was written a moment ago
+  send({ type: 'refreshLimits' });
+  await waitUntil(() => recorded.terminals.length === 1);
+  const [terminal] = recorded.terminals;
+  assert.deepStrictEqual(terminal.sent, [`claude --resume ${KEEPER_ID}`]);
+  await new Promise((resolve) => setTimeout(resolve, 1200)); // two polls: the old payload must not count as "started"
+  assert.deepStrictEqual(terminal.sent, [`claude --resume ${KEEPER_ID}`]);
+  await writeSessionPayload(storage, KEEPER_ID); // claude started: first status line, no limits yet
+  await waitUntil(() => terminal.sent.includes('hi'));
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  assert.ok(!terminal.sent.includes('/exit')); // no limits since "hi"
+  await writeSessionPayload(storage, KEEPER_ID, { hasLimits: true });
+  await waitUntil(() => terminal.sent.includes('/exit'));
+  await waitUntil(() => terminal.isDisposed);
+});
+
+test('Refresh asks before resuming a chat written to a moment ago, and does nothing when declined or already running', async (testContext) => {
+  const { send, dispose } = await startExtension(false, true);
+  testContext.after(dispose);
+  send({ type: 'select', id: KEEPER_ID });
+  recorded.terminals.length = 0;
+  recorded.warningAnswers.push(undefined);
+  send({ type: 'refreshLimits' });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.strictEqual(recorded.terminals.length, 0);
+  recorded.warningAnswers.push('Resume anyway');
+  send({ type: 'refreshLimits' });
+  send({ type: 'refreshLimits' }); // a second click while the first is running
+  await waitUntil(() => recorded.terminals.length === 1);
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.strictEqual(recorded.terminals.length, 1);
 });
