@@ -17,9 +17,6 @@ export const SKILL_CALL_NEEDLE = Buffer.from('"name":"Skill"');
 export const ATTACHMENT_NEEDLE = Buffer.from('"type":"attachment"');
 export const SKILLS_VERSION = 2;
 export const NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_.:-]{0,99}$/; // tool and skill names from logs: no markup, and never "__proto__"
-export const TARGET_FIELDS = ['file_path', 'path', 'command', 'pattern', 'url', 'query', 'skill'];
-export const TARGET_MAX_LENGTH = 80;
-export const TOP_BIGGEST_RESULTS = 5;
 export const TOP_TOOLS = 5;
 export const TOP_SKILLS_PER_SESSION = 5;
 export const TOP_SKILLS_PER_CHAT = 2;
@@ -44,19 +41,23 @@ export const STALE_AFTER_MS = 10 * 60 * 1000;
 export const KEEP_FILES_FOR_MS = 7 * 24 * 3600 * 1000;
 export const WATCH_DEBOUNCE_MS = 100;
 export const USAGE_QUERY_MIN_GAP_MS = 60 * 1000; // chatting also refreshes the limits, but never more often than this
+export const USAGE_QUERY_FILE = 'usage-query.json'; // in live/, so every window sees the answer one window asked for
+export const LOG_POLL_EVERY_TICKS = 5; // the log watcher does the work; the poll only catches what it missed
 export const USAGE_QUERY_TIMEOUT_MS = 15 * 1000;
 export const USAGE_QUERY_INTERVAL_MS = 5 * 60 * 1000; // under STALE_AFTER_MS, so queried limits never read as stale
 export const REFRESH_LIMITS_WAIT_MS = 30 * 1000; // how long the Refresh limits terminal waits for Claude Code's first status line
 export const REFRESH_LIMITS_POLL_MS = 500;
 export const REFRESH_LIMITS_CLOSE_MS = 1500;
 export const REFRESH_RESUME_BUSY_MS = 60 * 1000; // a chat written to this recently may be open in the chat panel: ask before resuming it
+export const NEW_CHAT_CHECK_MS = 2 * 1000; // how often queued new chats are checked for having gone quiet
+export const ACTIVATE_NEW_CHAT_IDLE_MS = 10 * 1000; // a new chat quiet this long has finished its first reply: activate it once
 
 // ---- Live-meter setup ----
 
 export const LOCK_STALE_MS = 10_000;
 export const LOCK_WAIT_MS = 3_000;
 export const LOCK_RETRY_MS = 50;
-export const POSIX_HOOK_COMMAND = /^sh '((?:[^']|'\\'')*)' '((?:[^']|'\\'')*)'$/;
+export const POSIX_HOOK_COMMAND = /^(?:if \[ -f '(?:[^']|'\\'')*' \]; then )?sh '((?:[^']|'\\'')*)' '((?:[^']|'\\'')*)'(?:; else sh -c '(?:[^']|'\\'')*')?(?:; fi)?$/; // the plain form older versions wrote, and the guarded one with the user's command as fallback
 export const WINDOWS_HOOK_COMMAND = /^node "([^"]+)" "([^"]+)"$/;
 export const INSTALLED_HOOK_PATH = /complementer[\\/]hook\.(sh|js)$/;
 
@@ -65,8 +66,8 @@ export const INSTALLED_HOOK_PATH = /complementer[\\/]hook\.(sh|js)$/;
 export const CHAT_INDEX_THROTTLE_MS = 5000; // re-indexing a changed log reads all of it, and the active chat's log grows constantly
 export const LARGE_LOG_BYTES = 50 * 1024 * 1024;
 export const LARGE_LOG_THROTTLE_MS = 30 * 1000; // re-indexing costs about 1 ms per MB, so a huge growing log is indexed less often
-export const INSIGHT_DAYS = 90;
-export const INSIGHT_RANGES = [7, 30, 90];
+export const INSIGHT_DAYS = 60; // also how long daily totals are kept: older days are dropped when the files are saved
+export const INSIGHT_RANGES = [1, 7, 30];
 export const TOP_PROJECTS_PER_DAY = 3;
 export const TOP_ENTRIES_PER_RANGE = 5;
 
@@ -82,3 +83,6 @@ export const SAVE_DEBOUNCE_MS = 2000;
 export const POLL_INTERVAL_MS = 60 * 1000;
 export const CLOCK_TICK_MS = 30 * 1000; // reset countdowns and staleness move with the clock
 export const ACTIVE_SESSION_MS = 5 * 60 * 1000;
+export const BACKUP_SUFFIX = '.bak'; // last good copy of a state file, made each time one loads
+export const UNREADABLE_SUFFIX = '.bad';
+export const IDLE_LOG_MS = 7 * 24 * 3600 * 1000; // a log untouched this long can no longer get more blocks of its last reply

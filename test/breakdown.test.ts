@@ -28,7 +28,6 @@ test('the baseline is the first response; what comes after is growth, measured b
   assert.strictEqual(tally.characters.assistantText, 7);
   assert.strictEqual(tally.characters.toolCalls, JSON.stringify({ file_path: '/p/a/big.ts' }).length);
   assert.deepStrictEqual(tally.toolCharacters, { Read: 300 });
-  assert.deepStrictEqual(tally.biggestResults, [{ tool: 'Read', target: '/p/a/big.ts', characters: 300, turn: 1 }]);
   assert.deepStrictEqual(tally.pendingToolUses, {}); // the result arrived
 });
 
@@ -45,7 +44,6 @@ test('tool results may be a list of blocks; thinking, attachments and sidechain 
   assert.ok(tally.characters.attachments > 4); // the attachment object, measured as JSON
   assert.strictEqual(tally.characters.toolResults, 5);
   assert.strictEqual(tally.latestTokens, 120); // the sidechain response did not move it
-  assert.strictEqual(tally.biggestResults[0].target, 'ls -la'); // whitespace collapsed
 });
 
 test('attachments and messages before the first response belong to the baseline', () => {
@@ -84,18 +82,11 @@ test('when the context shrinks (compaction or a rewind) the old sizes are droppe
   assert.strictEqual(tally.baselineTokens, 1200);
   assert.strictEqual(tally.latestTokens, 1300);
   assert.strictEqual(tally.characters.toolResults, 0);
-  assert.deepStrictEqual(tally.biggestResults, []);
   assert.deepStrictEqual(tally.toolCharacters, {});
   assert.strictEqual(tally.characters.userText, 5); // only what came after the shrink
   assert.strictEqual(tally.characters.assistantText, 3); // the replies after the shrink ('c' and 'dd') are new growth
   assert.deepStrictEqual(Object.entries(tally.skillCounts), [['code-review', 1]]); // skills stay: they happened in this session
   assert.strictEqual(tally.turn, 5); // turns keep counting: r1, the skill call, r2, r3, r4
-});
-
-test('only the largest tool results are kept', () => {
-  const lines = [...Array(8).keys()].map((i) => [buildAssistantBlockLine(`r${i}`, { type: 'tool_use', id: `t${i}`, name: 'Read', input: { file_path: `/f${i}` } }, { contextTokens: 100 + i }), buildToolResultLine(`t${i}`, 'x'.repeat((i + 1) * 10))]).flat();
-  const tally = tallyOf([buildAssistantBlockLine('r', { type: 'text', text: 'a' }, { contextTokens: 100 }), ...lines]);
-  assert.deepStrictEqual(tally.biggestResults.map((result) => result.characters), [80, 70, 60, 50, 40]);
 });
 
 test('readSessionTally reads only appended lines, waits for a partial line, and starts over on a shorter file', async () => {

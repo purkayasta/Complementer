@@ -1,6 +1,7 @@
 // Small shared helpers: non-throwing JSON and file reads, and tiny pure functions. Nothing in the extension uses the
 // *Sync fs functions: the extension host's event loop is shared with every other extension, so blocking it is rude.
 import fsPromises from 'node:fs/promises';
+import { BACKUP_SUFFIX, UNREADABLE_SUFFIX } from './consts';
 
 /** The file's text, or undefined if it cannot be read. */
 export async function tryReadText(filePath: string): Promise<string | undefined> {
@@ -69,4 +70,54 @@ export function errorMessage(error: unknown): string {
 /** Add to a named counter. The own-property check keeps names like "constructor" from reading the prototype. */
 export function incrementCount(counts: Record<string, number>, name: string, amount = 1) {
   counts[name] = (Object.hasOwn(counts, name) ? counts[name] : 0) + amount;
+}
+
+/**
+ * Replace a file without ever leaving it half-written. A symlink keeps pointing at its target (the real file is
+ * replaced) and the file keeps its permissions, since settings.json may hold tokens and may live in a dotfiles repo.
+ */
+export async function writeAtomic(filePath: string, content: string | Buffer) {
+  const targetPath = await fsPromises.realpath(filePath).catch(() => filePath);
+  const mode = await fsPromises.stat(targetPath).then(
+    (stats) => stats.mode & 0o777,
+    () => undefined,
+  );
+  const temporaryPath = `${targetPath}.${process.pid}.complementer.tmp`;
+  try {
+    await fsPromises.writeFile(temporaryPath, content);
+    if (mode !== undefined && process.platform !== 'win32') await fsPromises.chmod(temporaryPath, mode); // writeFile's own mode is cut by the umask
+    await fsPromises.rename(temporaryPath, targetPath);
+  } catch (error) {
+    await fsPromises.rm(temporaryPath, { force: true });
+    throw error;
+  }
+}
+
+/**
+ * Load a saved state file. `adopt` takes the parsed JSON and returns whether it was a known layout. A good file is copied
+ * to a backup; an unreadable one is set aside and the last good backup is tried instead (a missing file is a fresh start).
+ * @returns true if the state came from the backup, so the caller should save it again
+ */
+export async function loadWithBackup(filePath: string, adopt: (saved: any) => boolean): Promise<boolean> {
+  const text = await tryReadText(filePath);
+  if (text === undefined) return false;
+  if (adopt(tryParseJson(text))) {
+    await fsPromises.copyFile(filePath, filePath + BACKUP_SUFFIX).catch(() => {});
+    return false;
+  }
+  await fsPromises.rename(filePath, filePath + UNREADABLE_SUFFIX).catch(() => {});
+  const backupText = await tryReadText(filePath + BACKUP_SUFFIX);
+  return backupText !== undefined && adopt(tryParseJson(backupText));
+}
+
+/**
+ * Save a map of costs. Windows share the file but not memory, so by default the saved values are merged in first (the
+ * highest wins, costs only rise) and the merge also lands in `costs`. Pass shouldMerge false after removing entries.
+ */
+export async function writeCosts(filePath: string, costs: Record<string, number>, shouldMerge: boolean) {
+  if (shouldMerge) {
+    const saved = tryParseJson((await tryReadText(filePath)) ?? '');
+    for (const [key, value] of Object.entries<any>(saved ?? {})) if (typeof value === 'number' && value > (costs[key] ?? 0)) costs[key] = value;
+  }
+  await writeAtomic(filePath, JSON.stringify(costs));
 }

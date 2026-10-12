@@ -4,8 +4,8 @@ import { promises as fsPromises } from 'node:fs';
 import path from 'node:path';
 import type { SkillDays, SkillSessions, SkillFileState } from './types';
 import { SKILL_CALL_NEEDLE, SKILLS_VERSION, NAME_PATTERN } from './consts';
-import { getOwnSessionId, iterateLineBatches, toDayKey } from './logs';
-import { tryParseJson, tryReadText, incrementCount } from './utils';
+import { dropOldDays, getOwnSessionId, iterateLineBatches, toDayKey } from './logs';
+import { tryParseJson, loadWithBackup, incrementCount, writeAtomic } from './utils';
 
 /**
  * Callers pre-filter on the raw bytes (SKILL_CALL_NEEDLE), so a line that merely mentions the words is rejected here by shape.
@@ -37,25 +37,28 @@ export class SkillHistory {
 
   constructor(private readonly filePath: string) {}
 
-  /** A missing file is a fresh start; an unreadable or other-version one is set aside and rebuilt from the logs on disk. */
+  /** A missing file is a fresh start; an unreadable or other-version one is set aside and the last good backup is used, else it is rebuilt from the logs on disk. */
   static async load(filePath: string) {
     const history = new SkillHistory(filePath);
-    const text = await tryReadText(filePath);
-    if (text === undefined) return history;
-    const saved = tryParseJson(text);
-    if (saved?.version === SKILLS_VERSION && saved.days && saved.fileStates && saved.sessions) {
-      history.days = saved.days;
-      history.sessions = saved.sessions;
-      history.fileStates = saved.fileStates;
-    } else if (saved?.version === 1 && saved.days && saved.fileStates) {
-      // Version 1 had no per-session counts: keep the day counts and read each log once more for the sessions only.
-      history.days = saved.days;
-      history.fileStates = Object.fromEntries(Object.entries<SkillFileState>(saved.fileStates).map(([logPath, fileState]) => [logPath, { ...fileState, needsSessionBackfill: true }]));
-      history.hasUnsavedChanges = true;
-    } else {
-      await fsPromises.rename(filePath, filePath + '.bad').catch(() => {});
-    }
+    if (await loadWithBackup(filePath, (saved) => history.#adopt(saved))) history.hasUnsavedChanges = true;
     return history;
+  }
+
+  #adopt(saved: any): boolean {
+    if (saved?.version === SKILLS_VERSION && saved.days && saved.fileStates && saved.sessions) {
+      this.days = saved.days;
+      this.sessions = saved.sessions;
+      this.fileStates = saved.fileStates;
+      return true;
+    }
+    if (saved?.version === 1 && saved.days && saved.fileStates) {
+      // Version 1 had no per-session counts: keep the day counts and read each log once more for the sessions only.
+      this.days = saved.days;
+      this.fileStates = Object.fromEntries(Object.entries<SkillFileState>(saved.fileStates).map(([logPath, fileState]) => [logPath, { ...fileState, needsSessionBackfill: true }]));
+      this.hasUnsavedChanges = true;
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -133,13 +136,12 @@ export class SkillHistory {
   }
 
   async #saveNow() {
+    if (dropOldDays(this.days, new Date())) this.hasUnsavedChanges = true;
     if (!this.hasUnsavedChanges) return;
     this.hasUnsavedChanges = false;
-    const temporaryPath = this.filePath + '.tmp';
     try {
       await fsPromises.mkdir(path.dirname(this.filePath), { recursive: true });
-      await fsPromises.writeFile(temporaryPath, JSON.stringify({ version: SKILLS_VERSION, days: this.days, sessions: this.sessions, fileStates: this.fileStates }));
-      await fsPromises.rename(temporaryPath, this.filePath);
+      await writeAtomic(this.filePath, JSON.stringify({ version: SKILLS_VERSION, days: this.days, sessions: this.sessions, fileStates: this.fileStates }));
     } catch (error) {
       this.hasUnsavedChanges = true; // retry on the next flush
       throw error;

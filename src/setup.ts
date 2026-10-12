@@ -7,9 +7,7 @@ import { promisify } from 'node:util';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { SetupPaths } from './types';
 import { LOCK_STALE_MS, LOCK_WAIT_MS, LOCK_RETRY_MS, POSIX_HOOK_COMMAND, WINDOWS_HOOK_COMMAND, INSTALLED_HOOK_PATH } from './consts';
-import { tryParseJson, tryReadText, shellQuote, ignoreMissingFile } from './utils';
-
-const isWindowsHost = process.platform === 'win32';
+import { tryParseJson, tryReadText, shellQuote, ignoreMissingFile, writeAtomic } from './utils';
 
 const isWindows = (paths: SetupPaths) => (paths.platform ?? process.platform) === 'win32';
 
@@ -18,10 +16,16 @@ const getHookName = (paths: SetupPaths) => (isWindows(paths) ? 'hook.js' : 'hook
 const getHookPath = (paths: SetupPaths) => path.join(paths.storageDirectory, getHookName(paths));
 
 /**
- * Windows paths cannot contain double quotes, so double-quoting is safe for cmd and Git Bash alike.
+ * POSIX: if the hook file is gone (settings.json synced to another machine, extension data cleared), fall back to the
+ * user's own command instead of leaving their status line blank. Windows paths cannot contain double quotes, so
+ * double-quoting is safe for cmd and Git Bash alike there; that form has no fallback.
  */
-export const buildHookCommand = (paths: SetupPaths) =>
-  isWindows(paths) ? `node "${getHookPath(paths)}" "${paths.storageDirectory}"` : `sh ${shellQuote(getHookPath(paths))} ${shellQuote(paths.storageDirectory)}`;
+export const buildHookCommand = (paths: SetupPaths, originalCommand = '') => {
+  if (isWindows(paths)) return `node "${getHookPath(paths)}" "${paths.storageDirectory}"`;
+  const hookPath = shellQuote(getHookPath(paths));
+  const fallback = originalCommand ? `; else sh -c ${shellQuote(originalCommand)}` : '';
+  return `if [ -f ${hookPath} ]; then sh ${hookPath} ${shellQuote(paths.storageDirectory)}${fallback}; fi`;
+};
 
 /** Whether `node` can be run from PATH (the Windows hook needs it). */
 async function isNodeAvailable() {
@@ -39,27 +43,6 @@ async function readSettings(settingsPath: string): Promise<Record<string, any>> 
   const settings = tryParseJson(text);
   if (settings && typeof settings === 'object' && !Array.isArray(settings)) return settings;
   throw new Error(`${settingsPath} is not plain JSON; not touching it.`);
-}
-
-/**
- * Replace a file without ever leaving it half-written. A symlink keeps pointing at its target (the real file is
- * replaced) and the file keeps its permissions, since settings.json may hold tokens and may live in a dotfiles repo.
- */
-async function writeAtomic(filePath: string, content: string | Buffer) {
-  const targetPath = await fsPromises.realpath(filePath).catch(() => filePath);
-  const mode = await fsPromises.stat(targetPath).then(
-    (stats) => stats.mode & 0o777,
-    () => undefined,
-  );
-  const temporaryPath = `${targetPath}.${process.pid}.complementer.tmp`;
-  try {
-    await fsPromises.writeFile(temporaryPath, content);
-    if (mode !== undefined && !isWindowsHost) await fsPromises.chmod(temporaryPath, mode); // writeFile's own mode is cut by the umask
-    await fsPromises.rename(temporaryPath, targetPath);
-  } catch (error) {
-    await fsPromises.rm(temporaryPath, { force: true });
-    throw error;
-  }
 }
 
 /**
@@ -120,7 +103,7 @@ export function parseHookCommand(command: unknown): { hookPath: string; storageD
  * Whether this install's own hook is in the command. Compared against the command we would write, not the raw path:
  * shell quoting changes a path that contains a quote.
  */
-const isOwnHookCommand = (paths: SetupPaths, command: unknown): command is string => typeof command === 'string' && (command === buildHookCommand(paths) || command.includes(getHookPath(paths)));
+const isOwnHookCommand = (paths: SetupPaths, command: unknown): command is string => typeof command === 'string' && (parseHookCommand(command)?.hookPath === getHookPath(paths) || command.includes(getHookPath(paths)));
 
 /** Whether this install's hook is in the user's statusLine right now; undefined if settings.json cannot be read. */
 export async function isHookEnabled(paths: SetupPaths): Promise<boolean | undefined> {
@@ -143,7 +126,7 @@ export async function planEnable(paths: SetupPaths): Promise<{ isAlreadyEnabled:
     throw new Error(`Your statusLine already points at another copy of Complementer (${statusLine.command}). Edit statusLine in ${paths.settingsPath} back to your own command, then try again. Not touching it.`);
   }
   if (statusLine && statusLine.type !== 'command') throw new Error('Your statusLine is not a command type; not touching it.');
-  return { isAlreadyEnabled: false, commandBefore: statusLine ? statusLine.command : '(none)', commandAfter: buildHookCommand(paths), settings };
+  return { isAlreadyEnabled: false, commandBefore: statusLine ? statusLine.command : '(none)', commandAfter: buildHookCommand(paths, typeof statusLine?.command === 'string' ? statusLine.command : ''), settings };
 }
 
 export function enableStatusLine(paths: SetupPaths): Promise<{ changed: boolean }> {

@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import type { FileState, UsageRecord } from '../src/types';
-import { parseUsageLine, readNewRecords, History, Scanner } from '../src/logs';
+import { parseUsageLine, readNewRecords, dropOldDays, History, Scanner } from '../src/logs';
 import { ASSISTANT_MODEL, createTemporaryDirectory, writeTextFile, buildAssistantLine } from './helpers';
 
 const DAY = '2026-10-11';
@@ -108,6 +108,42 @@ test('a corrupt history file is set aside and a fresh one used', async () => {
   const history = await History.load(historyPath);
   assert.deepStrictEqual(history.days, {});
   await fsPromises.access(historyPath + '.bad');
+});
+
+test('a corrupt history file falls back to the last good backup, and the logs are read again from its offsets', async () => {
+  const projectsRoot = await createTemporaryDirectory();
+  const logPath = path.join(projectsRoot, 'proj', 'sess.jsonl');
+  await writeTextFile(logPath, buildAssistantLine('a', { sessionId: 'sess' }) + '\n');
+  const historyPath = path.join(await createTemporaryDirectory(), 'history.json');
+  const first = await History.load(historyPath);
+  await new Scanner(projectsRoot, first).scan();
+  await first.save();
+  await History.load(historyPath); // a good load makes the backup
+  await writeTextFile(historyPath, '{not json');
+  await fsPromises.appendFile(logPath, buildAssistantLine('b', { sessionId: 'sess' }) + '\n');
+  const recovered = await History.load(historyPath);
+  assert.strictEqual(recovered.hasUnsavedChanges, true); // the recovered state is saved again
+  assert.strictEqual(await new Scanner(projectsRoot, recovered).scan(), true);
+  assert.strictEqual(recovered.days[DAY]['/p/a'][ASSISTANT_MODEL].responseCount, 2); // 'a' from the backup, 'b' rescanned, nothing twice
+});
+
+test('days older than the Insights window are dropped, and idle logs drop their last reply but keep the offset', async () => {
+  const directory = await createTemporaryDirectory();
+  const history = new History(path.join(directory, 'history.json'));
+  const addDay = (day: string, outputTokens: number) => Object.assign(history.getBucket(day, '/p/a', ASSISTANT_MODEL), { outputTokens, responseCount: 1 });
+  addDay('2025-01-03', 5);
+  addDay('2026-08-20', 7); // 52 days before DAY
+  addDay(DAY, 9);
+  assert.strictEqual(dropOldDays(history.days, new Date(`${DAY}T12:00:00`)), true);
+  assert.deepStrictEqual(Object.keys(history.days).sort(), ['2026-08-20', DAY]);
+  assert.strictEqual(dropOldDays(history.days, new Date(`${DAY}T12:00:00`)), false);
+  const logPath = path.join(directory, 'old.jsonl');
+  await writeTextFile(logPath, '{}\n');
+  const longAgo = new Date(Date.now() - 30 * 24 * 3600 * 1000);
+  await fsPromises.utimes(logPath, longAgo, longAgo);
+  history.addRecord(parseUsageLine(buildAssistantLine('m1')) as UsageRecord, (history.fileStates[logPath] = { offset: 3, lastResponse: null }));
+  await history.dropIdleLastResponses(Date.now());
+  assert.deepStrictEqual(history.fileStates[logPath], { offset: 3, lastResponse: null });
 });
 
 test('overlapping saves never leave a broken history file', async () => {

@@ -1,7 +1,7 @@
 // Plan limits asked straight from the user's own installed `claude`, the way the official extension does it: start
 // `claude` in stream-json mode and send the control request `get_usage`. No message is sent (no plan usage) and no
 // session is logged. This request is undocumented (the official extension marks it EXPERIMENTAL), so every failure
-// returns undefined and the panel the ↻ button in the panel is the fallback.
+// returns undefined and the ↻ button in the panel is the fallback.
 import { spawn } from 'node:child_process';
 import type { Limit } from './types';
 import { tryParseJson } from './utils';

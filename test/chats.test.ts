@@ -64,3 +64,15 @@ test('a "limit reached" notice after a real reply does not blank the chat\'s con
   assert.strictEqual(chatIndex.chats[0].contextTokens, 112);
   assert.strictEqual(chatIndex.chats[0].modelId, 'claude-sonnet-5-5');
 });
+
+test('a malformed block in a log does not hide the rest of the transcript', async () => {
+  const projectsRoot = await createTemporaryDirectory();
+  const logPath = path.join(projectsRoot, 'proj', 'c1.jsonl');
+  const lines = [
+    JSON.stringify({ type: 'user', message: { content: [null, { type: 'text' }, { type: 'tool_result', content: [null, { text: 'ok' }] }, { type: 'text', text: 'Still here' }] } }),
+    JSON.stringify({ type: 'assistant', message: { content: [null, { type: 'text' }, { type: 'text', text: 'Reply' }] } }),
+  ];
+  await writeTextFile(logPath, lines.join('\n') + '\n');
+  const transcript = await renderTranscript(logPath);
+  assert.ok(transcript.includes('Still here') && transcript.includes('Reply') && /result: +ok/.test(transcript));
+});

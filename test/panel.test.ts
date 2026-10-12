@@ -86,10 +86,11 @@ async function loadPanel() {
   const template = await fsPromises.readFile(path.join(VIEWS_DIRECTORY, 'panel.html'), 'utf8');
   const script = await fsPromises.readFile(path.join(VIEWS_DIRECTORY, 'panel.js'), 'utf8');
   const elementsById = createElementsFromTemplate(template);
+  const rootElement = new FakeHTMLElement('html');
   const postedMessages: unknown[] = [];
   const handlers: Record<string, Listener> = {};
   vm.runInNewContext(script, {
-    document: { getElementById: (id: string) => elementsById[id] ?? null, createElement: (tagName: string) => new FakeHTMLElement(tagName) },
+    document: { documentElement: rootElement, getElementById: (id: string) => elementsById[id] ?? null, createElement: (tagName: string) => new FakeHTMLElement(tagName) },
     window: { addEventListener: (eventName: string, handler: Listener) => (handlers[eventName] = handler) },
     HTMLElement: FakeHTMLElement,
     HTMLSelectElement: FakeHTMLSelectElement,
@@ -97,7 +98,7 @@ async function loadPanel() {
     acquireVsCodeApi: () => ({ getState: () => undefined, setState() {}, postMessage: (message: unknown) => postedMessages.push(JSON.parse(JSON.stringify(message))) }),
     setInterval: () => 0,
   });
-  return { elementsById, postedMessages, sendState: (state: unknown) => handlers.message({ data: state }) };
+  return { elementsById, rootElement, postedMessages, sendState: (state: unknown) => handlers.message({ data: state }) };
 }
 
 /** Every descendant (and the root) that passes the test. */
@@ -111,7 +112,7 @@ function dayInsight(dayOfMonth: number, totalTokens: number): DayInsight {
   return { date: `2026-10-${String(dayOfMonth).padStart(2, '0')}`, totalTokens, ...(totalTokens ? { outputTokens: 5, topProjects: [['proj', totalTokens]] } : {}) };
 }
 
-const RANGE: RangeInsight = { inputTokens: 10, cacheCreationTokens: 20, cacheReadTokens: 970, outputTokens: 5, activeDays: 2, projects: [['proj', 1005]], models: [['claude-sonnet-5-5', 1005]], skills: [['code-review', 19], ['docs-graph', 9]] };
+const RANGE: RangeInsight = { inputTokens: 10, cacheCreationTokens: 20, cacheReadTokens: 970, outputTokens: 5, projects: [['proj', 1005]], models: [['claude-sonnet-5-5', 1005]], skills: [['code-review', 19], ['docs-graph', 9]] };
 
 const BREAKDOWN = {
   baselineTokens: 1000,
@@ -119,7 +120,6 @@ const BREAKDOWN = {
   windowSize: 10000,
   parts: [{ kind: 'toolResults', tokens: 450 }, { kind: 'assistantText', tokens: 150 }],
   tools: [['Read', 300], ['Bash', 150]],
-  biggestResults: [{ tool: 'Read', target: '<img src=x onerror=1>', tokens: 300, turn: 3 }],
 } satisfies Breakdown;
 
 const STATE: PanelState = {
@@ -137,7 +137,7 @@ const STATE: PanelState = {
     { id: 'c2', title: 'Second chat', projectName: 'other', projectPath: '/x/other', isInWorkspace: false, modifiedAtMs: Date.now() - 86400000 },
     { id: 'c3', title: 'Just started', projectName: '', projectPath: '', isInWorkspace: false, modifiedAtMs: Date.now() },
   ],
-  insights: { days: [dayInsight(9, 0), dayInsight(10, 400), dayInsight(11, 605)], ranges: { 7: RANGE, 30: RANGE, 90: RANGE }, streakDays: 2, busiestDay: { date: '2026-10-11', totalTokens: 605 } },
+  insights: { days: [dayInsight(9, 0), dayInsight(10, 400), dayInsight(11, 605)], ranges: { 1: RANGE, 7: RANGE, 30: RANGE }, streakDays: 2, busiestDay: { date: '2026-10-11', totalTokens: 605 } },
   activeChatId: 'c1',
 };
 
@@ -153,6 +153,8 @@ test('panel renders account, usage levels, chat rows and insights without errors
   sendState(STATE);
   assert.deepStrictEqual(elementsById['account-rows'].children.map((row) => row.textContent), ['Emaila@b.co', 'PlanTeam · Standard', 'OrganizationAcme']);
   assert.strictEqual(elementsById.account.hidden, false);
+  assert.deepStrictEqual(findAll(elementsById['chat-list'], hasClass('group-header')).map((header) => header.textContent), ['▾ Ungrouped · 1', '▾ proj · 1']); // Active is on by default: the day-old chat is hidden
+  elementsById['active-filter'].listeners.click(); // show everything
   // Ungrouped and the workspace project are open, 'other' is collapsed: 3 headers + 2 rows.
   assert.deepStrictEqual(findAll(elementsById['chat-list'], hasClass('group-header')).map((header) => header.textContent), ['▾ Ungrouped · 1', '▾ proj · 1', '▸ other · 1']);
   assert.strictEqual(findAll(elementsById['chat-list'], (element) => element.classes.has('delete-button')).length, 4); // Trash and permanent, for each of the 2 open rows
@@ -186,8 +188,8 @@ test('panel messages: click opens, Delete deletes without opening, range switch 
   assert.match(elementsById['insights-body'].children[0].children[0].textContent, /1\.0k/);
   findAll(elementsById['session-line'], (element) => element.tagName === 'button')[0].listeners.click();
   assert.deepStrictEqual(postedMessages.at(-1), { type: 'select', id: null });
-  elementsById['new-session'].listeners.click();
-  assert.deepStrictEqual(postedMessages.at(-1), { type: 'new' });
+  elementsById['new-chat'].listeners.click();
+  assert.deepStrictEqual(postedMessages.at(-1), { type: 'newChat' });
 });
 
 test('groups: same-named folders stay apart, the followed session opens its group, a search makes headers inert', async () => {
@@ -205,7 +207,7 @@ test('groups: same-named folders stay apart, the followed session opens its grou
 
 test('panel shows empty states without crashing', async () => {
   const { elementsById, sendState } = await loadPanel();
-  sendState({ usage: { isStale: false, isLiveOff: true, note: 'Live meters are off.' }, chats: [], insights: { days: [dayInsight(11, 0)], ranges: { 7: RANGE, 30: RANGE, 90: RANGE }, streakDays: 0 } });
+  sendState({ usage: { isStale: false, isLiveOff: true, note: 'Live meters are off.' }, chats: [], insights: { days: [dayInsight(11, 0)], ranges: { 1: RANGE, 7: RANGE, 30: RANGE }, streakDays: 0 } });
   assert.match(elementsById['chat-empty'].textContent, /No chats found/);
   assert.match(elementsById['insights-body'].textContent, /No usage recorded yet/);
   assert.strictEqual(elementsById['usage-note'].textContent, 'Live meters are off.');
@@ -232,13 +234,10 @@ test('context breakdown: a bar and legend by default, details on demand, log nam
   const details = findAll(meters, hasClass('details'))[0];
   assert.match(details.textContent, /Baseline \(fixed\)1\.0k/);
   assert.match(details.textContent, /Read~300/); // per-tool subtotal
-  assert.match(details.textContent, /Biggest tool outputs/);
-  assert.match(details.textContent, /turn 3/);
+  assert.doesNotMatch(details.textContent, /Biggest/);
   assert.match(details.textContent, /Skills used/);
   assert.match(details.textContent, /code-review×8/);
   assert.match(details.textContent, /The split is an estimate/);
-  assert.ok(details.textContent.includes('<img src=x onerror=1>')); // shown as text...
-  assert.strictEqual(findAll(meters, (element) => element.tagName === 'img').length, 0); // ...never as markup
   findAll(meters, hasClass('details-toggle'))[0].listeners.click();
   assert.strictEqual(findAll(meters, hasClass('details')).length, 0); // and closes again
 });
@@ -260,6 +259,30 @@ test('insights list the most used skills for the chosen range, and nothing when 
   assert.match(text, /code-review×19/);
   assert.match(text, /Counts uses, not tokens/);
   const noSkills = { ...RANGE, skills: [] };
-  sendState({ ...STATE, insights: { ...STATE.insights, ranges: { 7: noSkills, 30: noSkills, 90: noSkills } } });
+  sendState({ ...STATE, insights: { ...STATE.insights, ranges: { 1: noSkills, 7: noSkills, 30: noSkills } } });
   assert.doesNotMatch(elementsById['insights-body'].textContent, /Top skills/);
+});
+
+/** WCAG relative luminance of an `rgb(r, g, b)` string. */
+function luminanceOfRgb(color: string): number {
+  const [red, green, blue] = (color.match(/\d+/g) ?? []).map((channel) => Number(channel) / 255).map((value) => (value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+}
+
+test('the button and the bars get random colours that stay readable: white text on them, and visible on a light and a dark theme', async () => {
+  const colorsSeen = new Set<string>();
+  for (let load = 0; load < 40; load++) {
+    const { rootElement, elementsById, sendState } = await loadPanel();
+    sendState({ ...STATE, usage: { ...STATE.usage, fiveHour: { percent: 10, label: '10%', caption: '' }, context: { percent: 20, label: '20%', caption: '' } } });
+    const colors = ['--button-start', '--button-end', '--accent-start', '--accent-end'].map((name) => rootElement.styleProperties[name]);
+    const barColors = findAll(elementsById.meters, hasClass('meter-fill')).map((fill) => fill.styleProperties['--bar-color']);
+    assert.ok(barColors.length >= 2 && barColors.every((color) => /^rgb\(/.test(color)));
+    for (const color of [...colors, ...barColors]) {
+      const luminance = luminanceOfRgb(color);
+      assert.ok(1.05 / (luminance + 0.05) >= 4.5, `${color} is too light for white text`);
+      assert.ok((luminance + 0.05) / (0.013 + 0.05) >= 3, `${color} is too dark for a dark theme`);
+      colorsSeen.add(color);
+    }
+  }
+  assert.ok(colorsSeen.size > 20); // not the same colours every time
 });

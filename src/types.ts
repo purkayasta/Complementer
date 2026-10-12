@@ -64,16 +64,6 @@ export type ContentKind = 'toolResults' | 'toolCalls' | 'assistantText' | 'assis
 /** A tool call whose result has not been read yet. */
 export interface PendingToolUse {
   tool: string;
-  /** The file, command or pattern the call was about, cut short. */
-  target: string;
-  turn: number;
-}
-
-export interface ToolResultSize {
-  tool: string;
-  target: string;
-  characters: number;
-  turn: number;
 }
 
 /** What has been read so far from one session log. Sizes and names only: chat text is never kept. */
@@ -92,8 +82,6 @@ export interface SessionTally {
   toolCharacters: Record<string, number>;
   /** Tool use id -> the call, until its result arrives. */
   pendingToolUses: Record<string, PendingToolUse>;
-  /** The largest tool results, largest first. */
-  biggestResults: ToolResultSize[];
   /** Skill name -> times called in this session. */
   skillCounts: Record<string, number>;
 }
@@ -102,14 +90,6 @@ export interface BreakdownPart {
   kind: ContentKind;
   /** Estimated tokens. */
   tokens: number;
-}
-
-export interface BiggestResult {
-  tool: string;
-  target: string;
-  /** Estimated tokens. */
-  tokens: number;
-  turn: number;
 }
 
 /** The context window split into the fixed baseline (exact) and the growth since (estimated by size). */
@@ -121,7 +101,6 @@ export interface Breakdown {
   parts: BreakdownPart[];
   /** Top [tool, estimated tokens] pairs of the tool results. */
   tools: NamedAmount[];
-  biggestResults: BiggestResult[];
 }
 
 /** Day (YYYY-MM-DD, local) -> skill name -> times called. */
@@ -254,7 +233,8 @@ export interface DayInsight {
 }
 
 export interface RangeInsight extends TokenTotals {
-  activeDays: number;
+  /** Cost Claude Code reported live on these days, like "$4.20"; absent when none was recorded. */
+  costLabel?: string;
   /** Top five [project, tokens] pairs. */
   projects: NamedAmount[];
   /** Top five [model id, tokens] pairs. */
@@ -264,9 +244,9 @@ export interface RangeInsight extends TokenTotals {
 }
 
 export interface Insights {
-  /** The last 90 days, oldest first. */
+  /** The last 60 days, oldest first. */
   days: DayInsight[];
-  /** Rollups for 7, 30 and 90 days. */
+  /** Rollups for 1, 7 and 30 days. */
   ranges: Record<number, RangeInsight>;
   streakDays: number;
   busiestDay?: { date: string; totalTokens: number };
@@ -285,6 +265,8 @@ export interface PanelChat {
   isInWorkspace: boolean;
   modifiedAtMs: number;
   context?: { percent: number };
+  /** The session cost Claude Code reported live; absent when this chat never reported one. */
+  costLabel?: string;
   /** The chat's most used skills, most used first. */
   skills?: NamedAmount[];
 }
@@ -294,7 +276,6 @@ export interface PanelUsage {
   fiveHour?: MeterView;
   weekly?: MeterView;
   session?: { title: string; isPinned: boolean };
-  costLabel?: string;
   /** Undefined until the window size is known and the context has grown since the first response. */
   breakdown?: Breakdown;
   /** [skill, times called] pairs of the shown session, most used first; empty when none. */
@@ -316,7 +297,7 @@ export interface PanelState {
 
 /** What the panel's script posts back to the extension. */
 export interface PanelMessage {
-  type: 'ready' | 'new' | 'select' | 'enable' | 'refreshLimits' | 'open' | 'read' | 'delete' | 'deletePermanently';
+  type: 'ready' | 'newChat' | 'select' | 'enable' | 'refreshLimits' | 'open' | 'read' | 'delete' | 'deletePermanently';
   /** A session id. */
   id?: string | null;
 }

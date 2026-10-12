@@ -3,8 +3,8 @@
 import { promises as fsPromises, type Dirent } from 'node:fs';
 import path from 'node:path';
 import type { Bucket, FileState, HistoryDays, TokenTotals, UsageRecord } from './types';
-import { USAGE_NEEDLE, TOKEN_KEYS, HISTORY_VERSION, READ_CHUNK_BYTES, NEWLINE_BYTE } from './consts';
-import { tryParseJson, tryReadText, toNonNegativeNumber, padTwoDigits, mapValues } from './utils';
+import { USAGE_NEEDLE, TOKEN_KEYS, HISTORY_VERSION, INSIGHT_DAYS, IDLE_LOG_MS, READ_CHUNK_BYTES, NEWLINE_BYTE } from './consts';
+import { tryParseJson, loadWithBackup, toNonNegativeNumber, padTwoDigits, mapValues, writeAtomic } from './utils';
 
 /**
  * Local-time day (YYYY-MM-DD), so "today" matches what the user sees on their clock.
@@ -13,6 +13,18 @@ import { tryParseJson, tryReadText, toNonNegativeNumber, padTwoDigits, mapValues
 export function toDayKey(isoTimestamp: string): string | null {
   const date = new Date(isoTimestamp);
   return Number.isNaN(date.getTime()) ? null : `${date.getFullYear()}-${padTwoDigits(date.getMonth() + 1)}-${padTwoDigits(date.getDate())}`;
+}
+
+/**
+ * Remove the entries of a day-keyed map that are older than the Insights window; nothing shows them. Offsets are kept
+ * elsewhere, so the logs those days came from are never counted again.
+ * @returns true if anything was removed
+ */
+export function dropOldDays(daysByKey: Record<string, unknown>, now: Date): boolean {
+  const cutoff = toDayKey(new Date(now.getTime() - INSIGHT_DAYS * 24 * 3600 * 1000).toISOString()) ?? '';
+  const oldKeys = Object.keys(daysByKey).filter((key) => key < cutoff);
+  oldKeys.forEach((key) => delete daysByKey[key]);
+  return oldKeys.length > 0;
 }
 
 /**
@@ -126,20 +138,23 @@ export class History {
   /** Totals and file offsets live in one file, so one atomic write keeps them consistent. */
   static async load(filePath: string) {
     const history = new History(filePath);
-    const text = await tryReadText(filePath);
-    if (text === undefined) return history;
-    const saved = tryParseJson(text);
-    if (saved?.version === HISTORY_VERSION && saved.days && saved.fileStates) {
-      history.days = saved.days;
-      history.fileStates = saved.fileStates;
-    } else if (saved?.version === 1 && saved.days && saved.files) {
-      Object.assign(history, migrateHistoryV1(saved));
-      history.hasUnsavedChanges = true;
-    } else {
-      // Offsets are lost with the totals, so a rescan of surviving logs is the only consistent recovery.
-      await fsPromises.rename(filePath, filePath + '.bad').catch(() => {});
-    }
+    // Offsets are lost with the totals, so a rescan of surviving logs (after the last good backup, if any) is the only consistent recovery.
+    if (await loadWithBackup(filePath, (saved) => history.#adopt(saved))) history.hasUnsavedChanges = true;
     return history;
+  }
+
+  #adopt(saved: any): boolean {
+    if (saved?.version === HISTORY_VERSION && saved.days && saved.fileStates) {
+      this.days = saved.days;
+      this.fileStates = saved.fileStates;
+      return true;
+    }
+    if (saved?.version === 1 && saved.days && saved.files) {
+      Object.assign(this, migrateHistoryV1(saved));
+      this.hasUnsavedChanges = true;
+      return true;
+    }
+    return false;
   }
 
   getBucket(day: string, workingDirectory: string, modelId: string): Bucket {
@@ -191,14 +206,33 @@ export class History {
     return result;
   }
 
+  /**
+   * Forget the last reply of logs that are gone or idle: it only matters while more blocks of that reply can still arrive.
+   * The offset stays, so a log restored from the Trash is not counted twice.
+   */
+  async dropIdleLastResponses(nowMs: number) {
+    await Promise.all(
+      Object.entries(this.fileStates)
+        .filter(([, fileState]) => fileState.lastResponse)
+        .map(async ([filePath, fileState]) => {
+          const modifiedAtMs = await fsPromises.stat(filePath).then(
+            (stats) => stats.mtimeMs,
+            (error) => (error.code === 'ENOENT' ? 0 : nowMs), // any other error: keep it
+          );
+          if (nowMs - modifiedAtMs <= IDLE_LOG_MS) return;
+          fileState.lastResponse = null;
+          this.hasUnsavedChanges = true;
+        }),
+    );
+  }
+
   async #saveNow() {
+    if (dropOldDays(this.days, new Date())) this.hasUnsavedChanges = true;
     if (!this.hasUnsavedChanges) return;
     this.hasUnsavedChanges = false;
-    const temporaryPath = this.filePath + '.tmp';
     try {
       await fsPromises.mkdir(path.dirname(this.filePath), { recursive: true });
-      await fsPromises.writeFile(temporaryPath, JSON.stringify({ version: HISTORY_VERSION, days: this.days, fileStates: this.fileStates }));
-      await fsPromises.rename(temporaryPath, this.filePath);
+      await writeAtomic(this.filePath, JSON.stringify({ version: HISTORY_VERSION, days: this.days, fileStates: this.fileStates }));
     } catch (error) {
       this.hasUnsavedChanges = true; // retry on the next flush
       throw error;

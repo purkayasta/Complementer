@@ -6,7 +6,7 @@ import { disableStatusLine, parseHookCommand } from './setup';
 import { tryReadText, tryParseJson } from './utils';
 
 /**
- * The storage directory is the hook's last argument: `sh '<dir>/hook.sh' '<dir>'` or `node "<dir>\\hook.js" "<dir>"`.
+ * The storage directory is the hook's last argument: `sh '<dir>/hook.sh' '<dir>'` (older versions; newer ones wrap it in `if [ -f ... ]; then ...; fi`) or `node "<dir>\\hook.js" "<dir>"`.
  * @param command A statusLine.command from settings.json.
  * @returns undefined unless the command is one of this extension's hook commands
  */

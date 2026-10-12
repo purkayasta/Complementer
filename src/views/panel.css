@@ -1,7 +1,10 @@
-/* Sessions panel. Colours come from the VS Code theme; the neon blue accent is our own. */
+/* Sessions panel. Colours come from the VS Code theme; the accent and button colours are random each time the panel loads
+   (panel.ts sets them), these blues are only the fallback. */
 :root {
   --accent-start: #2979ff;
   --accent-end: #00b8ff;
+  --button-start: #2979ff;
+  --button-end: #00b8ff;
   --accent-text: #4cc9ff;
   --border: var(--vscode-widget-border, rgba(136, 136, 136, 0.27));
 }
@@ -154,7 +157,7 @@ ul {
   margin-top: 3px;
 }
 
-/* New session button */
+/* New Chat button */
 .primary-button {
   display: flex;
   gap: 8px;
@@ -165,15 +168,15 @@ ul {
   font-size: 13px;
   font-weight: 600;
   color: #fff;
-  background: linear-gradient(135deg, var(--accent-start), var(--accent-end));
+  background: linear-gradient(135deg, var(--button-start), var(--button-end));
   border-radius: 6px;
-  box-shadow: 0 0 10px rgba(0, 184, 255, 0.35);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--button-end) 45%, transparent);
   transition: filter 0.15s, box-shadow 0.15s;
 }
 
 .primary-button:hover {
   filter: brightness(1.12);
-  box-shadow: 0 0 14px rgba(0, 184, 255, 0.6);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--button-end) 75%, transparent);
 }
 
 .primary-button:active {
@@ -185,7 +188,33 @@ ul {
   outline-offset: 2px;
 }
 
-/* Chat list */
+/* The usage block follows the chat list, which has no bottom border */
+#usage {
+  border-top: 1px solid var(--border);
+}
+
+/* Account: a compact block */
+#account {
+  padding: 6px 14px;
+  font-size: 10px;
+}
+
+#account .section-title {
+  margin: 0 0 3px;
+  font-size: 10px;
+}
+
+#account .key-value {
+  gap: 8px;
+  margin-bottom: 1px;
+}
+
+/* Chat list: about five rows tall, the rest scrolls */
+#chat-list {
+  max-height: 240px;
+  overflow-y: auto;
+}
+
 .toolbar {
   display: flex;
   gap: 6px;
@@ -310,7 +339,8 @@ ul {
   font-weight: 600;
 }
 
-.chat-age {
+.chat-age,
+.chat-cost {
   opacity: 0.6;
   font-size: 12px;
 }
@@ -340,7 +370,8 @@ ul {
   display: flex;
 }
 
-.chat-row:hover .chat-age {
+.chat-row:hover .chat-age,
+.chat-row:hover .chat-cost {
   display: none;
 }
 
@@ -466,7 +497,7 @@ ul {
 
 .bar-row-fill {
   height: 100%;
-  background: linear-gradient(90deg, var(--accent-start), #00e5ff);
+  background: linear-gradient(90deg, var(--accent-start), var(--accent-end));
 }
 
 .model-stack {
@@ -549,29 +580,6 @@ ul {
 
 .legend-row.is-sub > :first-child::before {
   display: none;
-}
-
-.biggest-row {
-  font-size: 11px;
-  margin: 3px 0;
-  padding-top: 2px;
-  border-top: 1px solid var(--border);
-}
-
-.biggest-row-header {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.biggest-row .muted {
-  font-size: 10px;
-}
-
-.biggest-row-header > :first-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .estimate-note {

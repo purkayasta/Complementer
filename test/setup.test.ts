@@ -322,3 +322,20 @@ test('isHookEnabled tells whether this install is in statusLine, and is undefine
   await fsPromises.writeFile(paths.settingsPath, 'not json');
   assert.strictEqual(await setup.isHookEnabled(paths), undefined);
 });
+
+test('the hook command falls back to the original command when the hook file is gone, and still parses', async () => {
+  const original = "echo 'it''s mine'";
+  const paths = await createSetupPaths(JSON.stringify({ statusLine: { type: 'command', command: original } }), undefined, "it's.complementer");
+  await setup.enableStatusLine(paths);
+  const { command } = (await readSettingsFile(paths.settingsPath)).statusLine;
+  assert.match(command, /^if \[ -f '/);
+  assert.strictEqual(setup.parseHookCommand(command)?.storageDirectory, paths.storageDirectory);
+  assert.strictEqual((await setup.planEnable(paths)).isAlreadyEnabled, true);
+  const withHook = await runWithInput('sh', ['-c', command], '{"session_id":"abc"}');
+  assert.strictEqual(withHook.stdout, 'its mine\n');
+  await fsPromises.rm(path.join(paths.storageDirectory, 'hook.sh'));
+  const withoutHook = await runWithInput('sh', ['-c', command], '{"session_id":"abc"}');
+  assert.deepStrictEqual(withoutHook, { stdout: 'its mine\n', exitCode: 0 }); // the user's status line still prints
+  assert.deepStrictEqual(await setup.disableStatusLine(paths), { changed: true });
+  assert.strictEqual((await readSettingsFile(paths.settingsPath)).statusLine.command, original);
+});

@@ -3,8 +3,9 @@
 import path from 'node:path';
 import { pickSessions, isWithin, effectiveLimit, isStale } from './live';
 import { toDayKey } from './logs';
+import { incrementCount } from './utils';
 import type { Account, Bucket, Breakdown, SessionTally, SkillDays, SkillSessions, Chat, HistoryDays, Insights, DayInsight, LiveState, MeterView, Meters, NamedAmount, PanelState, PanelTemplateValues, RangeInsight, TokenTotals, WindowState } from './types';
-import { CHAT_INDEX_THROTTLE_MS, LARGE_LOG_BYTES, LARGE_LOG_THROTTLE_MS, INSIGHT_DAYS, INSIGHT_RANGES, TOP_PROJECTS_PER_DAY, TOP_ENTRIES_PER_RANGE, TOP_TOOLS, TOP_SKILLS_PER_CHAT, TOP_SKILLS_PER_SESSION, CONTENT_KINDS } from './consts';
+import { UUID_PATTERN, CHAT_INDEX_THROTTLE_MS, LARGE_LOG_BYTES, LARGE_LOG_THROTTLE_MS, INSIGHT_DAYS, INSIGHT_RANGES, TOP_PROJECTS_PER_DAY, TOP_ENTRIES_PER_RANGE, TOP_TOOLS, TOP_SKILLS_PER_CHAT, TOP_SKILLS_PER_SESSION, CONTENT_KINDS } from './consts';
 
 /**
  * How long to wait before re-indexing chats.
@@ -56,8 +57,9 @@ export function computeMeters({ liveStates, chats, workspaceFolders, selectedSes
 }): Meters {
   const { contextSession: automaticSession, limitsSession } = pickSessions(liveStates, workspaceFolders, ignoredSessionIds);
   const selectedChat = selectedSessionId ? chats.find((chat) => chat.id === selectedSessionId) : undefined;
-  const liveSession = selectedChat ? liveStates.find((state) => state.sessionId === selectedChat.id) : automaticSession;
-  const chat = selectedChat ?? findAutomaticChat(chats.filter((candidate) => !ignoredSessionIds?.has(candidate.id)), liveSession, workspaceFolders);
+  const chat = selectedChat ?? findAutomaticChat(chats.filter((candidate) => !ignoredSessionIds?.has(candidate.id)), automaticSession, workspaceFolders);
+  // A chat newer than the last live report (a brand-new session) has no payload yet: do not show the older session's meters for it.
+  const liveSession = chat ? liveStates.find((state) => state.sessionId === chat.id) : automaticSession;
   const derived = liveSession?.contextPercent === undefined ? contextFromTokens(chat?.contextTokens, chat?.modelId, windowSizes) : undefined;
   const newestStatus = liveSession ?? limitsSession;
   return {
@@ -74,10 +76,10 @@ export function computeMeters({ liveStates, chats, workspaceFolders, selectedSes
   };
 }
 
-/** The session to show when nothing is pinned: the one that last reported live, else the newest chat in this workspace. */
+/** The session to show when nothing is pinned: the newest chat in this workspace, else the one that last reported live. */
 function findAutomaticChat(chats: Chat[], liveSession: LiveState | undefined, workspaceFolders: string[]): Chat | undefined {
-  if (liveSession) return chats.find((chat) => chat.id === liveSession.sessionId);
-  return chats.filter((chat) => workspaceFolders.some((folder) => isWithin(chat.workingDirectory, folder))).reduce(newerChat, undefined);
+  const newest = chats.filter((chat) => workspaceFolders.some((folder) => isWithin(chat.workingDirectory, folder))).reduce(newerChat, undefined);
+  return newest ?? chats.find((chat) => chat.id === liveSession?.sessionId);
 }
 
 /** Reducer: keep whichever of two chats was modified last. */
@@ -133,7 +135,6 @@ export function computeBreakdown(tally: SessionTally, windowSize: number | undef
       Object.entries(tally.toolCharacters).map(([tool, characters]): NamedAmount => [tool, characters * tokensPerCharacter]),
       TOP_TOOLS,
     ),
-    biggestResults: tally.biggestResults.map(({ tool, target, characters, turn }) => ({ tool, target, tokens: characters * tokensPerCharacter, turn })),
   };
 }
 
@@ -159,7 +160,22 @@ function sumTokens(rows: { bucket: Bucket }[], key: keyof TokenTotals): number {
   return rows.reduce((sum, row) => sum + row.bucket[key], 0);
 }
 
-function summariseRange(dates: string[], historyDays: HistoryDays, skillDays: SkillDays): RangeInsight {
+/**
+ * Raise each real session's saved cost to what Claude Code reports live; the raise is also added to `day`'s cost.
+ * Mutates both records. A resumed session starts counting from 0 again, so it adds nothing until it passes its old high.
+ * @returns whether anything changed
+ */
+export function learnCosts(liveStates: LiveState[], sessionCosts: Record<string, number>, dayCosts: Record<string, number>, day: string): boolean {
+  const raised = liveStates.filter((state) => UUID_PATTERN.test(state.sessionId) && state.costUsd !== undefined && state.costUsd > (sessionCosts[state.sessionId] ?? 0));
+  for (const state of raised) {
+    const costUsd = state.costUsd as number;
+    incrementCount(dayCosts, day, costUsd - (sessionCosts[state.sessionId] ?? 0));
+    sessionCosts[state.sessionId] = costUsd;
+  }
+  return raised.length > 0;
+}
+
+function summariseRange(dates: string[], historyDays: HistoryDays, skillDays: SkillDays, dayCosts: Record<string, number>): RangeInsight {
   const rows = dates.flatMap((date) =>
     Object.entries(historyDays[date] ?? {}).flatMap(([workingDirectory, byModel]) => Object.entries(byModel).map(([modelId, bucket]) => ({ project: projectName(workingDirectory), modelId, bucket }))),
   );
@@ -168,7 +184,7 @@ function summariseRange(dates: string[], historyDays: HistoryDays, skillDays: Sk
     cacheCreationTokens: sumTokens(rows, 'cacheCreationTokens'),
     cacheReadTokens: sumTokens(rows, 'cacheReadTokens'),
     outputTokens: sumTokens(rows, 'outputTokens'),
-    activeDays: dates.filter((date) => historyDays[date]).length,
+    costLabel: dates.some((date) => dayCosts[date] !== undefined) ? formatUsd(dates.reduce((sum, date) => sum + (dayCosts[date] ?? 0), 0)) : undefined,
     projects: topByName(rows.map((row): NamedAmount => [row.project, totalTokensOf(row.bucket)]), TOP_ENTRIES_PER_RANGE),
     models: topByName(rows.map((row): NamedAmount => [row.modelId, totalTokensOf(row.bucket)]), TOP_ENTRIES_PER_RANGE),
     skills: topByName(dates.flatMap((date) => Object.entries(skillDays[date] ?? {})), TOP_ENTRIES_PER_RANGE),
@@ -186,14 +202,14 @@ function countStreak(days: DayInsight[]): number {
   return firstGap === -1 ? newestFirst.length - skipToday : firstGap;
 }
 
-/** Daily totals for the last 90 days plus 7/30/90-day rollups (by project and model). */
-export function computeInsights(historyDays: HistoryDays, now: Date, skillDays: SkillDays = {}): Insights {
+/** Daily totals for the last 60 days plus 1/7/30-day rollups (by project and model). */
+export function computeInsights(historyDays: HistoryDays, now: Date, skillDays: SkillDays = {}, dayCosts: Record<string, number> = {}): Insights {
   const dates = lastDayKeys(now, INSIGHT_DAYS);
   const days = dates.map((date) => summariseDay(date, historyDays[date]));
   const busiest = days.reduce((best, day) => (day.totalTokens > best.totalTokens ? day : best), days[0]);
   return {
     days,
-    ranges: Object.fromEntries(INSIGHT_RANGES.map((count) => [count, summariseRange(dates.slice(-count), historyDays, skillDays)])),
+    ranges: Object.fromEntries(INSIGHT_RANGES.map((count) => [count, summariseRange(dates.slice(-count), historyDays, skillDays, dayCosts)])),
     streakDays: countStreak(days),
     busiestDay: busiest.totalTokens ? { date: busiest.date, totalTokens: busiest.totalTokens } : undefined,
   };
@@ -213,11 +229,13 @@ function statusNote(meters: Meters, hasLiveFeed: boolean, hasLiveData: boolean):
   if (!hasLiveFeed && !meters.fiveHour) return 'Live meters are off. Click to enable exact values.';
   // Claude Code's chat panel never runs the status line, so only terminal sessions fill the meters.
   if (!hasLiveData) return 'Limits need a Claude terminal session. Press ↻ to start one briefly (a few tokens).';
+  // A chat that only ran in the chat panel (a new one, for example) has no payload of its own: its context is read from the log, without cost.
+  if (meters.chat && !meters.liveSession) return 'Context is estimated from the chat log. Press ↻ for its exact context and cost.';
   return meters.isStale ? 'Stale: press ↻ to refresh.' : '';
 }
 
 /** Everything the Sessions panel draws. */
-export function buildPanelState({ meters, account, liveStates, isLiveEnabled, chats, workspaceFolders, windowSizes, insights, selectedSessionId, nowMs, breakdown, sessionSkills = [], skillSessions = {} }: {
+export function buildPanelState({ meters, account, liveStates, isLiveEnabled, chats, workspaceFolders, windowSizes, insights, selectedSessionId, nowMs, breakdown, sessionSkills = [], skillSessions = {}, sessionCosts = {} }: {
   meters: Meters;
   account: Account | undefined;
   liveStates: LiveState[];
@@ -234,12 +252,15 @@ export function buildPanelState({ meters, account, liveStates, isLiveEnabled, ch
   sessionSkills?: NamedAmount[];
   /** Saved skill counts of every session, for the chat list. */
   skillSessions?: SkillSessions;
+  /** Saved cost per session id, for chats whose live payload is gone. */
+  sessionCosts?: Record<string, number>;
 }): PanelState {
   const liveBySessionId = new Map(liveStates.map((state) => [state.sessionId, state]));
   const panelChats = chats
     .map((chat) => {
+      const costUsd = liveBySessionId.get(chat.id)?.costUsd ?? sessionCosts[chat.id];
       const percent = liveBySessionId.get(chat.id)?.contextPercent ?? contextFromTokens(chat.contextTokens, chat.modelId, windowSizes)?.percent;
-      return { id: chat.id, title: chat.title, projectName: chat.workingDirectory ? projectName(chat.workingDirectory) : '', projectPath: chat.workingDirectory, isInWorkspace: workspaceFolders.some((folder) => isWithin(chat.workingDirectory, folder)), modifiedAtMs: chat.modifiedAtMs, context: percent === undefined ? undefined : { percent }, skills: topChatSkills(skillSessions[chat.id]) };
+      return { id: chat.id, title: chat.title, projectName: chat.workingDirectory ? projectName(chat.workingDirectory) : '', projectPath: chat.workingDirectory, isInWorkspace: workspaceFolders.some((folder) => isWithin(chat.workingDirectory, folder)), modifiedAtMs: chat.modifiedAtMs, context: percent === undefined ? undefined : { percent }, costLabel: costUsd === undefined ? undefined : formatUsd(costUsd), skills: topChatSkills(skillSessions[chat.id]) };
     })
     .sort((first, second) => second.modifiedAtMs - first.modifiedAtMs);
   const hasLiveFeed = isLiveEnabled ?? liveStates.length > 0;
@@ -257,7 +278,6 @@ export function buildPanelState({ meters, account, liveStates, isLiveEnabled, ch
       fiveHour: toLimitView(meters.fiveHour, meters.limitsSession?.fiveHourLimit?.resetsAt, nowMs),
       weekly: toLimitView(meters.weekly, meters.limitsSession?.weeklyLimit?.resetsAt, nowMs),
       session: meters.chat ? { title: meters.chat.title, isPinned: Boolean(selectedSessionId) } : undefined,
-      costLabel: meters.liveSession?.costUsd === undefined ? undefined : formatUsd(meters.liveSession.costUsd),
       breakdown,
       skills: sessionSkills.length ? sessionSkills : undefined,
       limitsUpdatedAtMs: meters.limitsSession?.updatedAt,

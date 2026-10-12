@@ -58,6 +58,7 @@ const vscodeStub = {
   },
   workspace: {
     workspaceFolders: [{ uri: { fsPath: '/p/a' } }], // the fixture chats ran in /p/a
+    getConfiguration: () => ({ get: (_key: string, fallback: unknown) => fallback }),
     registerTextDocumentContentProvider: () => ({ dispose() {} }),
     onDidChangeWorkspaceFolders: () => ({ dispose() {} }),
     fs: {
@@ -171,7 +172,7 @@ test('the panel lists chats with context from the learned window, shows the acco
   assert.deepStrictEqual(webview.options.localResourceRoots.map((root) => path.basename(root.fsPath)), ['views']);
 });
 
-test('pinning follows a session; opening a chat and New session use the official command', async (testContext) => {
+test('pinning follows a session; opening a chat and New Chat use the official command', async (testContext) => {
   const { postedStates, send, dispose } = await startExtension();
   testContext.after(dispose);
   recorded.executedCommands.length = 0;
@@ -181,7 +182,7 @@ test('pinning follows a session; opening a chat and New session use the official
   assert.deepStrictEqual(recorded.executedCommands.at(-1), ['claude-vscode.primaryEditor.open', KEEPER_ID]);
   send({ type: 'select', id: null });
   await waitUntil(() => postedStates.at(-1)?.usage.session?.isPinned === false);
-  send({ type: 'new' });
+  send({ type: 'newChat' });
   await waitUntil(() => recorded.executedCommands.at(-1)?.length === 1);
   assert.deepStrictEqual(recorded.executedCommands.at(-1), ['claude-vscode.primaryEditor.open']);
 });
@@ -338,4 +339,34 @@ test('Refresh asks before resuming a chat written to a moment ago, and does noth
   await waitUntil(() => recorded.terminals.length === 1);
   await new Promise((resolve) => setTimeout(resolve, 200));
   assert.strictEqual(recorded.terminals.length, 1);
+});
+
+test('a chat that appears after startup is offered its meters once it has been quiet', async (testContext) => {
+  const app = await startExtension(false, true);
+  testContext.after(() => app.dispose());
+  recorded.infoMessages.length = 0;
+  const newId = '33333333-3333-4333-8333-333333333333';
+  const logPath = path.join(app.claude, 'projects', '-fake-proj', `${newId}.jsonl`);
+  await writeTextFile(logPath, buildAssistantLine('m9', { sessionId: newId }) + '\n');
+  const quietSince = new Date(Date.now() - 60 * 1000);
+  await fsPromises.utimes(logPath, quietSince, quietSince);
+  await waitUntil(() => recorded.infoMessages.some((message) => message.includes('load its context and limits')), 10000);
+});
+
+test('session costs are saved as the highest value reported, for real sessions only', async (testContext) => {
+  const { storage, dispose } = await startExtension();
+  testContext.after(dispose);
+  const costsPath = path.join(storage, 'session-costs.json');
+  const readCosts = async () => JSON.parse((await fsPromises.readFile(costsPath, 'utf8').catch(() => '{}')) || '{}');
+  const reportCost = (sessionId: string, totalCostUsd: number) => writeTextFile(path.join(storage, 'live', `${sessionId}.json`), JSON.stringify({ session_id: sessionId, cwd: '/p/a', cost: { total_cost_usd: totalCostUsd } }));
+  await reportCost('not-a-uuid', 9);
+  await reportCost(KEEPER_ID, 1.5);
+  const deadline = Date.now() + 3000;
+  while ((await readCosts())[KEEPER_ID] !== 1.5) {
+    if (Date.now() > deadline) throw new Error('the cost was never saved');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  await reportCost(KEEPER_ID, 0.5); // a resumed session starts counting again
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.deepStrictEqual(await readCosts(), { [KEEPER_ID]: 1.5 });
 });

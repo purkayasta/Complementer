@@ -132,7 +132,7 @@ export async function renderTranscript(filePath: string): Promise<string> {
 /** @param block A tool_result block's content. */
 function toolResultText(block: any): string {
   if (typeof block.content === 'string') return block.content;
-  return Array.isArray(block.content) ? block.content.map((part: any) => part.text ?? '').join('\n') : '';
+  return Array.isArray(block.content) ? block.content.map((part: any) => (typeof part?.text === 'string' ? part.text : '')).join('\n') : '';
 }
 
 /**
@@ -146,15 +146,15 @@ function entryToMarkdown(entry: any): string[] {
   if (!Array.isArray(content)) return [];
   if (entry.type === 'user') {
     return content.flatMap((block: any) => {
-      if (block.type === 'text' && !block.text.trimStart().startsWith('<')) return [`## You\n\n${block.text.trim()}\n`];
-      if (block.type === 'tool_result') return [`> result: ${truncate(toolResultText(block).replace(/\n/g, ' '), 300)}\n`];
+      if (block?.type === 'text' && typeof block.text === 'string' && !block.text.trimStart().startsWith('<')) return [`## You\n\n${block.text.trim()}\n`];
+      if (block?.type === 'tool_result') return [`> result: ${truncate(toolResultText(block).replace(/\n/g, ' '), 300)}\n`];
       return [];
     });
   }
   if (entry.type === 'assistant') {
     return content.flatMap((block: any) => {
-      if (block.type === 'text' && block.text.trim()) return [`## Claude\n\n${block.text.trim()}\n`];
-      if (block.type === 'tool_use') return [`> tool: **${block.name}** ${truncate(JSON.stringify(block.input ?? {}), 200)}\n`];
+      if (block?.type === 'text' && typeof block.text === 'string' && block.text.trim()) return [`## Claude\n\n${block.text.trim()}\n`];
+      if (block?.type === 'tool_use') return [`> tool: **${block.name}** ${truncate(JSON.stringify(block.input ?? {}), 200)}\n`];
       return [];
     });
   }

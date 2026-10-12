@@ -17,7 +17,7 @@ interface ViewState {
   /** Project folder path, or '' for all. */
   projectFilter: string;
   showOnlyActive: boolean;
-  /** Days: 7, 30 or 90. */
+  /** Days: 1, 7 or 30. */
   insightRange: number;
   /** Whether the context Details under the Context meter are open. */
   areDetailsOpen: boolean;
@@ -41,24 +41,64 @@ const ACTIVE_WINDOW_MS = 5 * 60 * 1000;
 const REFRESH_INTERVAL_MS = 30 * 1000;
 const WARNING_ABOVE_PERCENT = 50;
 const DANGER_FROM_PERCENT = 80;
-const INSIGHT_RANGES = [7, 30, 90];
-const MODEL_COLORS = ['#00b8ff', '#2979ff', '#6e5aff', '#00e5c7', '#b388ff', '#ffb74d'];
+const INSIGHT_RANGES = [1, 7, 30];
 const HEATMAP_OPACITIES = [0, 0.28, 0.5, 0.75, 1];
 const HEATMAP_LEVELS = 4;
 const UNGROUPED_LABEL = 'Ungrouped';
 const BASELINE_COLOR = '#6b7280';
-const KIND_COLORS: Record<ContentKind, string> = { toolResults: '#f59e0b', toolCalls: '#fb7185', assistantText: '#2979ff', assistantThinking: '#06b6d4', userText: '#a78bfa', attachments: '#34d399' };
 const KIND_LABELS: Record<ContentKind, string> = { toolResults: 'Tool results', toolCalls: 'Tool calls', assistantText: 'Assistant text', assistantThinking: 'Thinking', userText: 'Your messages', attachments: 'Attachments' };
 const LEGEND_PARTS = 3;
 
+// ---- random colours ----
+// White text needs 4.5:1 against the colour (relative luminance 0.183 or less); a bar needs 3:1 against a white and a dark
+// theme (0.14 to 0.30). 0.17 does both for every hue, so each colour is the lightness of that hue that has this luminance.
+const READABLE_LUMINANCE = 0.17;
+const SATURATION = 0.75;
+const GOLDEN_ANGLE = 137.5; // neighbours in the palette stay far apart in hue
+const SEARCH_STEPS = 12;
+
+function hslToRgb(hue: number, lightness: number): number[] {
+  const sector = (((hue % 360) + 360) % 360) / 60;
+  const chroma = (1 - Math.abs(2 * lightness - 1)) * SATURATION;
+  const second = chroma * (1 - Math.abs((sector % 2) - 1));
+  const sectorColors = [[chroma, second, 0], [second, chroma, 0], [0, chroma, second], [0, second, chroma], [second, 0, chroma], [chroma, 0, second]];
+  return sectorColors[Math.floor(sector)].map((channel) => channel + lightness - chroma / 2);
+}
+
+function luminanceOf(rgb: number[]): number {
+  const [red, green, blue] = rgb.map((channel) => (channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+}
+
+/** The CSS colour of this hue at READABLE_LUMINANCE (luminance only rises with lightness, so halve the range). */
+function readableColor(hue: number): string {
+  const [lowest, highest] = Array.from({ length: SEARCH_STEPS }).reduce<number[]>(([low, high]) => (luminanceOf(hslToRgb(hue, (low + high) / 2)) < READABLE_LUMINANCE ? [(low + high) / 2, high] : [low, (low + high) / 2]), [0, 1]);
+  return `rgb(${hslToRgb(hue, (lowest + highest) / 2).map((channel) => Math.round(channel * 255)).join(', ')})`;
+}
+
+function buildPalette(baseHue: number, count: number): string[] {
+  return Array.from({ length: count }, (_unused, index) => readableColor(baseHue + index * GOLDEN_ANGLE));
+}
+
+const PALETTE = buildPalette(Math.random() * 360, 6); // new colours every time the panel loads
+const KIND_ORDER: ContentKind[] = ['toolResults', 'toolCalls', 'assistantText', 'assistantThinking', 'userText', 'attachments'];
+const KIND_COLORS = Object.fromEntries(KIND_ORDER.map((kind, index) => [kind, PALETTE[index]])) as Record<ContentKind, string>;
+
 const vscode = acquireVsCodeApi();
+
+const buttonHue = Math.random() * 360; // the New Chat button has its own colour
+const rootStyle = document.documentElement.style;
+rootStyle.setProperty('--accent-start', PALETTE[0]);
+rootStyle.setProperty('--accent-end', PALETTE[1]);
+rootStyle.setProperty('--button-start', readableColor(buttonHue));
+rootStyle.setProperty('--button-end', readableColor(buttonHue + 40));
 
 /** @param savedState Whatever vscode.getState() returned. */
 function createViewState(savedState: Partial<ViewState> | undefined): ViewState {
   return {
     projectFilter: savedState?.projectFilter ?? '',
-    showOnlyActive: Boolean(savedState?.showOnlyActive),
-    insightRange: savedState?.insightRange ?? 30,
+    showOnlyActive: savedState?.showOnlyActive ?? true,
+    insightRange: INSIGHT_RANGES.includes(savedState?.insightRange ?? 0) ? savedState?.insightRange ?? 1 : 1, // a saved 90 (removed) falls back to 1
     areDetailsOpen: Boolean(savedState?.areDetailsOpen),
     groupToggles: savedState?.groupToggles ?? {},
     searchText: '',
@@ -100,7 +140,7 @@ const elements = {
   meters: getElement('meters'),
   usageNote: getElement('usage-note'),
   refreshUsage: getElement('refresh-usage'),
-  newSession: getElement('new-session'),
+  newChat: getElement('new-chat'),
   projectFilter: getSelect('project-filter'),
   activeFilter: getElement('active-filter'),
   search: getInput('search'),
@@ -195,16 +235,15 @@ function limitsAgeText(updatedAtMs: number) {
 function renderUsage(usage: PanelState['usage']) {
   limitsAge.updatedAtMs = usage.limitsUpdatedAtMs ?? 0;
   limitsAge.element = usage.limitsUpdatedAtMs ? buildElement('div', { className: 'muted limits-age' }, limitsAgeText(usage.limitsUpdatedAtMs)) : null;
-  const contextMeter = usage.context && renderMeter('Context', usage.context, 'var(--vscode-charts-blue)');
+  const contextMeter = usage.context && renderMeter('Context', usage.context, PALETTE[0]);
   const contextDetails = renderContextDetails(usage);
   if (contextMeter) contextMeter.append(...contextDetails);
   const meters = [
-    usage.fiveHour && renderMeter('Session (5hr)', usage.fiveHour, 'var(--vscode-charts-orange)'),
-    usage.weekly && renderMeter('Weekly (7 day)', usage.weekly, 'var(--vscode-charts-purple)'),
+    usage.fiveHour && renderMeter('Session (5hr)', usage.fiveHour, PALETTE[1]),
+    usage.weekly && renderMeter('Weekly (7 day)', usage.weekly, PALETTE[2]),
     limitsAge.element,
     contextMeter,
     ...(contextMeter ? [] : contextDetails), // no context meter to sit under: the skills list still shows
-    usage.costLabel ? buildElement('div', { className: 'muted' }, 'Session cost ' + usage.costLabel) : null,
   ];
   elements.meters.replaceChildren(...meters.filter(isElement));
   elements.sessionLine.replaceChildren(...(usage.session ? sessionLineContent(usage.session) : []));
@@ -255,25 +294,7 @@ function renderBreakdownRows(breakdown: Breakdown) {
 }
 
 /** Short label for a tool target: a file's name, or a command without its leading `cd <dir> &&`. The full text stays in the tooltip. */
-function shortenTarget(target: string) {
-  const command = target.replace(/^cd\s+\S+\s*&&\s*/, '');
-  return command.startsWith('/') && !command.includes(' ') ? command.split('/').pop() || command : command;
-}
-
-function renderBiggestResults(breakdown: Breakdown) {
-  if (!breakdown.biggestResults.length) return [];
-  const rows = breakdown.biggestResults.map((result) =>
-    buildElement(
-      'div',
-      { className: 'biggest-row', title: result.target },
-      buildElement('div', { className: 'biggest-row-header' }, buildElement('span', {}, result.target ? `${result.tool} · ${shortenTarget(result.target)}` : result.tool), buildElement('span', {}, `~${formatTokens(result.tokens)}`)),
-      buildElement('div', { className: 'muted' }, `turn ${result.turn}`),
-    ),
-  );
-  return [buildElement('div', { className: 'subheading' }, 'Biggest tool outputs'), ...rows];
-}
-
-/** The bar, then a "Details" toggle (closed by default) that opens the parts, the biggest items and the skills used. */
+/** The bar, then a "Details" toggle (closed by default) that opens the parts and the skills used. */
 function renderContextDetails(usage: PanelState['usage']) {
   const { breakdown, skills = [] } = usage;
   if (!breakdown && !skills.length) return [];
@@ -292,7 +313,7 @@ function renderContextDetails(usage: PanelState['usage']) {
   const details = buildElement(
     'div',
     { className: 'details' },
-    ...(breakdown ? [...renderBreakdownRows(breakdown), ...renderBiggestResults(breakdown)] : []),
+    ...(breakdown ? renderBreakdownRows(breakdown) : []),
     ...(skills.length ? [buildElement('div', { className: 'subheading' }, 'Skills used'), ...renderSkillRows(skills)] : []),
     breakdown ? buildElement('div', { className: 'estimate-note' }, 'Baseline and total are exact. The split is an estimate.') : null,
   );
@@ -322,6 +343,7 @@ function renderChatRow(chat: PanelChat, activeChatId: string | undefined) {
     buildElement('span', { className: 'chat-dot' + (isActive(chat.modifiedAtMs) ? ' is-active' : '') }),
     buildElement('div', { className: 'chat-text' }, buildElement('b', { className: 'chat-title' }, chat.title), buildElement('span', { className: 'chat-project' }, chat.projectName), chat.skills ? buildElement('span', { className: 'chat-skills', title: 'Skills used in this chat' }, chat.skills.map(([name, count]) => `${name} ×${count}`).join(' · ')) : null),
     buildElement('span', { className: 'chat-percent' + (percentColor ? ' is-warning' : ''), style: percentColor ? { color: percentColor } : {}, title: chat.context ? 'Context use' : '' }, chat.context ? Math.round(chat.context.percent) + '%' : ''),
+    chat.costLabel ? buildElement('span', { className: 'chat-cost', title: 'Session cost reported by Claude Code' }, chat.costLabel) : null,
     buildElement('span', { className: 'chat-age' }, formatAge(chat.modifiedAtMs)),
     buildElement(
       'div',
@@ -408,7 +430,7 @@ function renderTiles(range: RangeInsight) {
     [formatTokens(promptTokens + range.outputTokens), 'Tokens'],
     [formatTokens(range.outputTokens), 'Output'],
     [promptTokens ? Math.round((range.cacheReadTokens / promptTokens) * 100) + '%' : '-', 'Cache hit'],
-    [`${range.activeDays} / ${viewState.insightRange}`, 'Active days'],
+    [range.costLabel ?? '--', 'Cost'],
   ];
   return buildElement('div', { className: 'tiles' }, ...tiles.map(([value, label]) => buildElement('div', { className: 'tile' }, buildElement('b', { className: 'tile-value' }, value), buildElement('span', { className: 'tile-label' }, label))));
 }
@@ -437,7 +459,7 @@ function renderHeatmap(days: DayInsight[]) {
     buildElement('div', {
       className: 'heatmap-cell' + (day.date === viewState.selectedDay ? ' is-selected' : ''),
       title: `${formatDate(day.date)}: ${formatTokens(day.totalTokens)}`,
-      style: day.totalTokens ? { background: `rgba(0, 184, 255, ${HEATMAP_OPACITIES[heatmapLevel(day.totalTokens, busiestTokens)]})` } : {},
+      style: day.totalTokens ? { background: `color-mix(in srgb, ${PALETTE[0]} ${HEATMAP_OPACITIES[heatmapLevel(day.totalTokens, busiestTokens)] * 100}%, transparent)` } : {},
       onClick: (event) => {
         viewState.selectedDay = day.date;
         cells.forEach((cell) => cell.classList.remove('is-selected'));
@@ -447,7 +469,7 @@ function renderHeatmap(days: DayInsight[]) {
     }),
   );
   const spacers = Array.from({ length: firstWeekday }, () => buildElement('div', { className: 'heatmap-cell is-spacer' }));
-  return [buildElement('div', { className: 'subheading' }, 'Last 13 weeks'), buildElement('div', { className: 'heatmap' }, ...spacers, ...cells), detail];
+  return [buildElement('div', { className: 'subheading' }, 'Last 60 days'), buildElement('div', { className: 'heatmap' }, ...spacers, ...cells), detail];
 }
 
 function renderTopProjects(range: RangeInsight, totalTokens: number) {
@@ -458,7 +480,7 @@ function renderTopProjects(range: RangeInsight, totalTokens: number) {
 }
 
 function modelColor(index: number) {
-  return MODEL_COLORS[index % MODEL_COLORS.length];
+  return PALETTE[index % PALETTE.length];
 }
 
 function renderModelMix(range: RangeInsight, totalTokens: number) {
@@ -523,7 +545,7 @@ function renderAll() {
   renderInsights();
 }
 
-elements.newSession.addEventListener('click', () => vscode.postMessage({ type: 'new' }));
+elements.newChat.addEventListener('click', () => vscode.postMessage({ type: 'newChat' }));
 elements.refreshUsage.addEventListener('click', () => vscode.postMessage({ type: 'refreshLimits' }));
 elements.usageNote.addEventListener('click', () => {
   if (viewState.panelState?.usage.isLiveOff) vscode.postMessage({ type: 'enable' });

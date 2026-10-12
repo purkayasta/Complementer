@@ -52,6 +52,12 @@ test('computeMeters follows the latest session in the workspace, using its live 
   assert.strictEqual(meters.selectedSessionIsMissing, false);
 });
 
+test('computeMeters: a newer chat without a live payload is followed instead of the older live session', () => {
+  const meters = viewModel.computeMeters({ ...baseInputs, chats: [chat('old', { modifiedAtMs: 1 }), chat('new', { modifiedAtMs: 2 })], liveStates: [liveState('old')] });
+  assert.strictEqual(meters.chat?.id, 'new');
+  assert.strictEqual(meters.liveSession, undefined);
+});
+
 test('computeMeters: a pinned session wins, and its context comes from its own log when it has not reported live', () => {
   const meters = viewModel.computeMeters({
     ...baseInputs,
@@ -85,13 +91,12 @@ test('computeInsights: ranges, streak, busiest day and per-day detail', () => {
     '2026-10-08': { '/work/app': { 'claude-sonnet-5-5': bucketWithOutput(1) } },
   };
   const insights = viewModel.computeInsights(historyDays, new Date('2026-10-11T12:00:00'));
-  assert.strictEqual(insights.days.length, 90);
-  assert.strictEqual(insights.days[89].date, '2026-10-11');
+  assert.strictEqual(insights.days.length, 60);
+  assert.strictEqual(insights.days[59].date, '2026-10-11');
   assert.strictEqual(insights.streakDays, 2); // the 11th and 10th; the 9th is empty
   assert.deepStrictEqual(insights.busiestDay, { date: '2026-10-10', totalTokens: 106 });
-  assert.deepStrictEqual(insights.days[88].topProjects, [['app', 100], ['other', 6]]);
+  assert.deepStrictEqual(insights.days[58].topProjects, [['app', 100], ['other', 6]]);
   const week = insights.ranges[7];
-  assert.strictEqual(week.activeDays, 3);
   assert.strictEqual(week.outputTokens, 99);
   assert.deepStrictEqual(week.projects[0], ['app', 117]); // 10 + 100 + 7
   assert.deepStrictEqual(week.models.map(([modelId]) => modelId), ['claude-sonnet-5-5', 'claude-opus-5']);
@@ -109,6 +114,25 @@ test('chatIndexDelayMs: normal logs refresh every 5 s, a log over 50 MB every 30
   assert.strictEqual(viewModel.chatIndexDelayMs(0), 5000);
   assert.strictEqual(viewModel.chatIndexDelayMs(LARGE_LOG_BYTES), 5000);
   assert.strictEqual(viewModel.chatIndexDelayMs(LARGE_LOG_BYTES + 1), 30000);
+});
+
+test('buildPanelState: a chat row shows its live cost, else its saved cost', () => {
+  const liveStates = [liveState('a', { costUsd: 1.5 })];
+  const state = viewModel.buildPanelState({
+    meters: viewModel.computeMeters({ ...baseInputs, chats: [chat('a'), chat('b')], liveStates }),
+    account: undefined,
+    liveStates,
+    isLiveEnabled: true,
+    chats: [chat('a'), chat('b')],
+    workspaceFolders: ['/work/app'],
+    windowSizes: WINDOW_SIZES,
+    insights: viewModel.computeInsights({}, new Date(NOW_MS)),
+    selectedSessionId: undefined,
+    nowMs: NOW_MS,
+    skillSessions: {},
+    sessionCosts: { b: 0.25 },
+  });
+  assert.deepStrictEqual(state.chats.map((row) => [row.id, row.costLabel]), [['a', '$1.50'], ['b', '$0.25']]); // live wins; the saved cost covers a chat with no payload
 });
 
 test('buildPanelState: chat rows carry their own context percent, newest first', () => {
@@ -181,18 +205,16 @@ test('buildPanelState: live on but no payload yet says it is waiting and that on
   assert.match(note, /terminal session.*↻/);
 });
 
-test('computeBreakdown: parts add up to the growth, tools and biggest items are scaled the same way, unknowns show nothing', () => {
+test('computeBreakdown: parts add up to the growth, tools are scaled the same way, unknowns show nothing', () => {
   const tally = createSessionTally();
   Object.assign(tally, { baselineTokens: 1000, latestTokens: 1600 });
   tally.characters.toolResults = 300;
   tally.characters.assistantText = 100;
   tally.toolCharacters = { Read: 200, Bash: 100 };
-  tally.biggestResults = [{ tool: 'Read', target: 'a.ts', characters: 200, turn: 3 }];
   const breakdown = viewModel.computeBreakdown(tally, 10000);
   assert.ok(breakdown);
   assert.deepStrictEqual(breakdown.parts, [{ kind: 'toolResults', tokens: 450 }, { kind: 'assistantText', tokens: 150 }]); // 600 tokens over 400 characters
   assert.deepStrictEqual(breakdown.tools, [['Read', 300], ['Bash', 150]]);
-  assert.deepStrictEqual(breakdown.biggestResults, [{ tool: 'Read', target: 'a.ts', tokens: 300, turn: 3 }]);
   assert.deepStrictEqual([breakdown.baselineTokens, breakdown.totalTokens, breakdown.windowSize], [1000, 1600, 10000]);
   assert.strictEqual(viewModel.computeBreakdown(tally, undefined), undefined); // window size unknown: never guess
   assert.strictEqual(viewModel.computeBreakdown({ ...tally, latestTokens: 900 }, 10000), undefined); // context shrank (compaction): no honest split
@@ -211,7 +233,6 @@ test('computeInsights: top skills follow the range and add up across days', () =
   const insights = viewModel.computeInsights({}, new Date('2026-10-11T12:00:00'), skillDays);
   assert.deepStrictEqual(insights.ranges[7].skills, [['code-review', 3], ['brainstorming', 2]]);
   assert.deepStrictEqual(insights.ranges[30].skills[0], ['code-review', 3]); // 1 September is 40 days back
-  assert.deepStrictEqual(insights.ranges[90].skills[0], ['code-review', 13]);
   assert.deepStrictEqual(viewModel.computeInsights({}, new Date('2026-10-11T12:00:00')).ranges[7].skills, []); // no skill file yet
 });
 
@@ -230,7 +251,7 @@ test('buildPanelState: the breakdown and the session skills ride along in usage,
       nowMs: NOW_MS,
       ...extra,
     }).usage;
-  const breakdown = { baselineTokens: 1, totalTokens: 2, windowSize: 10, parts: [], tools: [], biggestResults: [] };
+  const breakdown = { baselineTokens: 1, totalTokens: 2, windowSize: 10, parts: [], tools: [] };
   assert.strictEqual(build({ breakdown, sessionSkills: [['code-review', 2]] }).breakdown, breakdown);
   assert.deepStrictEqual(build({ breakdown, sessionSkills: [['code-review', 2]] }).skills, [['code-review', 2]]);
   assert.strictEqual(build({}).breakdown, undefined);
@@ -250,4 +271,31 @@ test('computeMeters: the Activate helper session feeds the limits but is never t
   assert.strictEqual(meters.chat?.id, 'mine');
   assert.strictEqual(meters.fiveHour?.percent, 10);
   assert.strictEqual(meters.contextPercent, 10);
+});
+
+test('buildPanelState: the followed chat has no payload of its own, so the note points to the refresh button', () => {
+  const build = (liveStates: LiveState[]) => {
+    const chats = [chat('new')];
+    const inputs = { liveStates, chats, workspaceFolders: ['/work/app'], selectedSessionId: undefined, windowSizes: WINDOW_SIZES, nowMs: NOW_MS };
+    return viewModel.buildPanelState({ meters: viewModel.computeMeters(inputs), account: undefined, isLiveEnabled: true, insights: viewModel.computeInsights({}, new Date(NOW_MS)), ...inputs }).usage.note;
+  };
+  assert.match(build([liveState('old', { fiveHourLimit: { percent: 10 } })]), /Context is estimated.*↻/); // another session reports; this one never did
+  assert.strictEqual(build([liveState('new')]), ''); // it reports: nothing to say
+});
+
+test('learnCosts: a session cost only goes up, the raise lands on the day, and non-sessions are ignored', () => {
+  const id = '11111111-2222-4333-8444-555555555555';
+  const sessionCosts: Record<string, number> = {};
+  const dayCosts: Record<string, number> = {};
+  assert.strictEqual(viewModel.learnCosts([liveState(id, { costUsd: 1.5 }), liveState('not-a-uuid', { costUsd: 9 }), liveState('x')], sessionCosts, dayCosts, '2026-10-11'), true);
+  assert.strictEqual(viewModel.learnCosts([liveState(id, { costUsd: 2 })], sessionCosts, dayCosts, '2026-10-12'), true);
+  assert.strictEqual(viewModel.learnCosts([liveState(id, { costUsd: 0.5 })], sessionCosts, dayCosts, '2026-10-12'), false); // resumed: counting again from 0
+  assert.deepStrictEqual(sessionCosts, { [id]: 2 });
+  assert.deepStrictEqual(dayCosts, { '2026-10-11': 1.5, '2026-10-12': 0.5 });
+});
+
+test('computeInsights: the cost of a range is the sum of its recorded days, and absent when none is recorded', () => {
+  const insights = viewModel.computeInsights({}, new Date('2026-10-11T12:00:00'), {}, { '2026-10-11': 1.25, '2026-10-08': 2, '2026-09-20': 4 });
+  assert.deepStrictEqual([1, 7, 30].map((days) => insights.ranges[days].costLabel), ['$1.25', '$3.25', '$7.25']);
+  assert.strictEqual(viewModel.computeInsights({}, new Date('2026-10-11T12:00:00'), {}, { '2026-10-01': 1 }).ranges[7].costLabel, undefined);
 });

@@ -2,7 +2,7 @@
 // Sizes are measured in characters; view-model.ts scales them to the measured growth in tokens.
 import { promises as fsPromises } from 'node:fs';
 import type { ContentKind, SessionTally } from './types';
-import { ASSISTANT_NEEDLE, USER_NEEDLE, ATTACHMENT_NEEDLE, NAME_PATTERN, TARGET_FIELDS, TARGET_MAX_LENGTH, TOP_BIGGEST_RESULTS, CONTENT_KINDS } from './consts';
+import { ASSISTANT_NEEDLE, USER_NEEDLE, ATTACHMENT_NEEDLE, NAME_PATTERN, CONTENT_KINDS } from './consts';
 import { iterateLineBatches } from './logs';
 import { tryParseJson, toNonNegativeNumber, incrementCount } from './utils';
 
@@ -16,7 +16,6 @@ export function createSessionTally(): SessionTally {
     characters: Object.fromEntries(CONTENT_KINDS.map((kind) => [kind, 0])) as Record<ContentKind, number>,
     toolCharacters: {},
     pendingToolUses: {},
-    biggestResults: [],
     skillCounts: {},
   };
 }
@@ -26,11 +25,6 @@ const lengthOf = (value: unknown): number => (typeof value === 'string' ? value.
 /** A tool name safe to show; anything else is reported as "other". */
 const toToolName = (name: unknown): string => (typeof name === 'string' && NAME_PATTERN.test(name) ? name : 'other');
 
-function describeTarget(input: any): string {
-  const field = TARGET_FIELDS.find((name) => typeof input?.[name] === 'string');
-  return field ? input[field].replace(/\s+/g, ' ').slice(0, TARGET_MAX_LENGTH) : '';
-}
-
 /** A tool result is a string or a list of blocks; only text blocks have a size (images are skipped). */
 function measureToolResult(content: unknown): number {
   if (typeof content === 'string') return content.length;
@@ -39,7 +33,7 @@ function measureToolResult(content: unknown): number {
 
 /** The context shrank (a compaction or a rewind): what was measured before is no longer in it. Skills and turns stay. */
 function forgetSizes(tally: SessionTally) {
-  Object.assign(tally, { baselineTokens: undefined, toolCharacters: {}, pendingToolUses: {}, biggestResults: [], characters: createSessionTally().characters });
+  Object.assign(tally, { baselineTokens: undefined, toolCharacters: {}, pendingToolUses: {}, characters: createSessionTally().characters });
 }
 
 function recordContextTokens(tally: SessionTally, usage: any) {
@@ -54,7 +48,7 @@ function addToolUse(tally: SessionTally, block: any) {
   const input = block.input ?? {};
   tally.characters.toolCalls += JSON.stringify(input).length;
   if (block.name === 'Skill' && typeof input.skill === 'string' && NAME_PATTERN.test(input.skill)) incrementCount(tally.skillCounts, input.skill);
-  if (typeof block.id === 'string') tally.pendingToolUses[block.id] = { tool: toToolName(block.name), target: describeTarget(input), turn: tally.turn };
+  if (typeof block.id === 'string') tally.pendingToolUses[block.id] = { tool: toToolName(block.name) };
 }
 
 function addAssistantBlock(tally: SessionTally, block: any) {
@@ -80,8 +74,6 @@ function addToolResult(tally: SessionTally, block: any) {
   const tool = pending?.tool ?? 'other';
   tally.characters.toolResults += characters;
   incrementCount(tally.toolCharacters, tool, characters);
-  if (!pending) return;
-  tally.biggestResults = [...tally.biggestResults, { tool, target: pending.target, characters, turn: pending.turn }].sort((first, second) => second.characters - first.characters).slice(0, TOP_BIGGEST_RESULTS);
 }
 
 /** Before the first response everything is part of the baseline, so user messages and attachments only count after it. */

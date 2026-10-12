@@ -4,17 +4,17 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
-import { History, Scanner, listLogFiles } from './logs';
-import { LiveFeed, readAccountIfChanged } from './live';
+import { History, Scanner, listLogFiles, toDayKey, dropOldDays } from './logs';
+import { LiveFeed, isWithin, readAccountIfChanged } from './live';
 import { ChatIndex, renderTranscript, getSessionPaths } from './chats';
 import { SkillHistory } from './skills';
 import { createSessionTally, readSessionTally } from './breakdown';
 import { queryUsage } from './usage';
 import * as setup from './setup';
 import * as viewModel from './view-model';
-import type { Account, Chat, LiveState, Meters, PanelMessage, SessionTally, SetupPaths, WindowSizeReport, WindowState } from './types';
-import { USAGE_QUERY_MIN_GAP_MS, USAGE_QUERY_INTERVAL_MS, REFRESH_LIMITS_WAIT_MS, REFRESH_LIMITS_POLL_MS, REFRESH_LIMITS_CLOSE_MS, REFRESH_RESUME_BUSY_MS, VIEWS_DIRECTORY, CONFIG_SECTION, CHAT_SCHEME, CLAUDE_OPEN_COMMAND, UUID_PATTERN, REFRESH_DEBOUNCE_MS, SCAN_DEBOUNCE_MS, SAVE_DEBOUNCE_MS, POLL_INTERVAL_MS, CLOCK_TICK_MS, ACTIVE_SESSION_MS } from './consts';
-import { tryReadText, pathExists, filterExistingPaths, tryParseJson, errorMessage } from './utils';
+import type { Account, Chat, Limit, LiveState, Meters, PanelMessage, SessionTally, SetupPaths, WindowSizeReport, WindowState } from './types';
+import { USAGE_QUERY_MIN_GAP_MS, USAGE_QUERY_INTERVAL_MS, USAGE_QUERY_FILE, LOG_POLL_EVERY_TICKS, REFRESH_LIMITS_WAIT_MS, REFRESH_LIMITS_POLL_MS, REFRESH_LIMITS_CLOSE_MS, REFRESH_RESUME_BUSY_MS, ACTIVATE_NEW_CHAT_IDLE_MS, NEW_CHAT_CHECK_MS, VIEWS_DIRECTORY, CONFIG_SECTION, CHAT_SCHEME, CLAUDE_OPEN_COMMAND, UUID_PATTERN, REFRESH_DEBOUNCE_MS, SCAN_DEBOUNCE_MS, SAVE_DEBOUNCE_MS, POLL_INTERVAL_MS, CLOCK_TICK_MS, ACTIVE_SESSION_MS } from './consts';
+import { tryReadText, pathExists, filterExistingPaths, tryParseJson, errorMessage, writeAtomic, writeCosts } from './utils';
 
 // The compiled folder holds the hook script and the panel's files next to this one, wherever the extension is installed.
 
@@ -70,7 +70,24 @@ class ComplementerExtension {
 
   isQueryingUsage = false;
 
+  pollTicks = 0;
+
   isRefreshingLimits = false;
+
+  /** Session id -> the highest cost Claude Code reported for it (session-costs.json); lets a row keep its cost after the live file is gone. */
+  pendingCostSaves: Promise<unknown> = Promise.resolve();
+
+  sessionCosts: Record<string, number> = {};
+
+  /** Local day -> cost Claude Code reported live that day (day-costs.json), for the Insights Cost tile. */
+  dayCosts: Record<string, number> = {};
+
+  /** Chats seen by the last index run (undefined until the first), and new ones still waiting for their first live payload. */
+  knownChatIds: Set<string> | undefined;
+
+  chatsAwaitingActivation = new Set<string>();
+
+  newChatTimer: NodeJS.Timeout | undefined;
 
   lastUsageQueryMs = 0;
 
@@ -115,13 +132,18 @@ class ComplementerExtension {
   static async create(context: vscode.ExtensionContext): Promise<ComplementerExtension> {
     const storageDirectory = context.globalStorageUri.fsPath;
     await fsPromises.mkdir(storageDirectory, { recursive: true });
-    const [history, skillHistory, panelTemplate, windowSizesText] = await Promise.all([
+    const [history, skillHistory, panelTemplate, windowSizesText, sessionCostsText, dayCostsText] = await Promise.all([
       History.load(path.join(storageDirectory, 'history.json')),
       SkillHistory.load(path.join(storageDirectory, 'skills.json')),
       fsPromises.readFile(path.join(VIEWS_DIRECTORY, 'panel.html'), 'utf8'),
       tryReadText(path.join(storageDirectory, 'windows.json')),
+      tryReadText(path.join(storageDirectory, 'session-costs.json')),
+      tryReadText(path.join(storageDirectory, 'day-costs.json')),
     ]);
-    return new ComplementerExtension(context, history, skillHistory, panelTemplate, tryParseJson(windowSizesText ?? '') ?? {});
+    const extension = new ComplementerExtension(context, history, skillHistory, panelTemplate, tryParseJson(windowSizesText ?? '') ?? {});
+    extension.sessionCosts = tryParseJson(sessionCostsText ?? '') ?? {};
+    extension.dayCosts = tryParseJson(dayCostsText ?? '') ?? {};
+    return extension;
   }
 
   /** Register everything with VS Code and start the background work. */
@@ -133,7 +155,7 @@ class ComplementerExtension {
       vscode.window.registerWebviewViewProvider(`${CONFIG_SECTION}.panel`, { resolveWebviewView: (webviewView) => this.resolvePanel(webviewView) }),
       vscode.commands.registerCommand(`${CONFIG_SECTION}.enableLive`, () => this.enableLiveMeters()),
       vscode.commands.registerCommand(`${CONFIG_SECTION}.disableLive`, () => this.disableLiveMeters()),
-      vscode.commands.registerCommand(`${CONFIG_SECTION}.newSession`, () => this.startNewSession()),
+      vscode.commands.registerCommand(`${CONFIG_SECTION}.newChat`, () => this.startNewChat()),
       vscode.commands.registerCommand(`${CONFIG_SECTION}.refreshLimits`, () => this.refreshLimits()),
       vscode.commands.registerCommand(`${CONFIG_SECTION}.dockPanel`, () => this.dockPanel()),
       vscode.workspace.onDidChangeWorkspaceFolders(() => this.requestRefresh()),
@@ -141,20 +163,26 @@ class ComplementerExtension {
     this.watchLogs();
     this.pollTimer = setInterval(() => this.poll(), POLL_INTERVAL_MS);
     this.clockTimer = setInterval(() => this.renderStatusBar(), CLOCK_TICK_MS);
-    this.refreshUsageLimits();
-    this.usageTimer = setInterval(() => this.refreshUsageLimits(), USAGE_QUERY_INTERVAL_MS);
+    this.usageTimer = setInterval(() => this.refreshUsageLimits(USAGE_QUERY_INTERVAL_MS / 2), USAGE_QUERY_INTERVAL_MS);
     this.renderStatusBar();
     this.refreshAccount();
     this.refreshHookCopy();
     this.refreshLiveEnabled();
-    this.liveFeed.start().then(() => this.requestRefresh());
-    this.scanLogs().then((hadNewData) => this.onScanComplete(hadNewData)); // the first catch-up runs off the activation path
+    this.liveFeed.start().then(() => {
+      this.requestRefresh();
+      this.refreshUsageLimits(); // after the load, so an answer another window just saved is reused
+    });
+    this.scanLogs().then(async (hadNewData) => {
+      this.onScanComplete(hadNewData); // the first catch-up runs off the activation path
+      await this.history.dropIdleLastResponses(Date.now());
+      this.saveTimer ||= setTimeout(() => this.flushHistory(), SAVE_DEBOUNCE_MS);
+    });
     this.scheduleChatIndexing(500);
   }
 
   dispose() {
     this.logWatcher?.close();
-    for (const timer of [this.refreshTimer, this.scanTimer, this.saveTimer, this.chatIndexTimer]) clearTimeout(timer);
+    for (const timer of [this.refreshTimer, this.scanTimer, this.saveTimer, this.chatIndexTimer, this.newChatTimer]) clearTimeout(timer);
     clearInterval(this.pollTimer);
     clearInterval(this.clockTimer);
     clearInterval(this.usageTimer);
@@ -163,6 +191,7 @@ class ComplementerExtension {
 
   /** Write the history and the skill counts now; VS Code waits for this on shutdown, so nothing is lost. */
   flushHistory() {
+    if (dropOldDays(this.dayCosts, new Date())) this.saveCosts('day-costs.json', this.dayCosts, false);
     return Promise.all([this.history.save(), this.skillHistory.save()]).catch(() => {});
   }
 
@@ -190,10 +219,32 @@ class ComplementerExtension {
     const newReports = [...this.liveFeed.states.values()].filter(reportsWindowSize).filter((report) => this.windowSizes[report.modelId] !== report.contextWindowSize);
     if (!newReports.length) return;
     for (const report of newReports) this.windowSizes[report.modelId] = report.contextWindowSize;
-    fsPromises.writeFile(path.join(this.storageDirectory, 'windows.json'), JSON.stringify(this.windowSizes)).catch(() => {});
+    writeAtomic(path.join(this.storageDirectory, 'windows.json'), JSON.stringify(this.windowSizes)).catch(() => {});
   }
 
-  /** After an upgrade the installed hook script may be stale; if live meters are on, copy the current one over it. */
+  /** Keep the cost each session reports live, so its row can show it later. Only real costs of known sessions are saved. */
+  learnSessionCosts() {
+    const today = toDayKey(new Date().toISOString()) ?? '';
+    if (!viewModel.learnCosts([...this.liveFeed.states.values()], this.sessionCosts, this.dayCosts, today)) return;
+    this.saveCosts('session-costs.json', this.sessionCosts);
+    this.saveCosts('day-costs.json', this.dayCosts);
+  }
+
+  /** One at a time, so two saves never share a temporary file. Pass shouldMerge false after removing entries, or the merge would bring them back. */
+  saveCosts(fileName: string, costs: Record<string, number>, shouldMerge = true) {
+    this.pendingCostSaves = this.pendingCostSaves.then(() => writeCosts(path.join(this.storageDirectory, fileName), costs, shouldMerge)).catch(() => {});
+  }
+
+  /** Forget the costs of sessions whose log is gone. Never with an empty index (the listing may have failed), nor for sessions still reporting live (their cost would be added to the day again). */
+  pruneSessionCosts() {
+    if (!this.chatIndex.chats.length) return;
+    const keptIds = new Set([...this.chatIndex.chats.map((chat) => chat.id), ...[...this.liveFeed.states.values()].map((state) => state.sessionId)]);
+    const staleIds = Object.keys(this.sessionCosts).filter((id) => !keptIds.has(id));
+    if (!staleIds.length) return;
+    for (const id of staleIds) delete this.sessionCosts[id];
+    this.saveCosts('session-costs.json', this.sessionCosts, false);
+  }
+
   /** Without a hook in settings.json no new live data arrives, so old live files must not pass for a working feed. */
   hasLiveFeed(): boolean {
     return this.isLiveEnabled ?? this.liveFeed.states.size > 0;
@@ -207,6 +258,7 @@ class ComplementerExtension {
     this.requestRefresh();
   }
 
+  /** After an upgrade the installed hook script may be stale; if live meters are on, copy the current one over it. */
   async refreshHookCopy() {
     try {
       if ((await setup.planEnable(this.setupPaths)).isAlreadyEnabled) await setup.enableStatusLine(this.setupPaths);
@@ -233,6 +285,7 @@ class ComplementerExtension {
 
   renderStatusBar() {
     this.learnWindowSizes();
+    this.learnSessionCosts();
     const meters = this.computeMeters();
     const parts = [
       meters.contextPercent === undefined ? '' : `Ctx ${viewModel.formatPercent(meters.contextPercent)}`,
@@ -251,7 +304,9 @@ class ComplementerExtension {
   buildTooltip(meters: Meters) {
     const nowMs = Date.now();
     const tooltip = new vscode.MarkdownString(undefined, true);
+    tooltip.isTrusted = { enabledCommands: [`${CONFIG_SECTION}.enableLive`] }; // only for the button below
     const todayTokens = viewModel.computeTodayTokens(this.history.days, new Date(nowMs));
+    const todayCostUsd = this.dayCosts[toDayKey(new Date(nowMs).toISOString()) ?? ''];
     const lines = [
       '**Complementer**',
       this.account ? `${this.account.email}${this.account.plan ? ` (${this.account.plan})` : ''}` : '',
@@ -259,9 +314,9 @@ class ComplementerExtension {
       meters.fiveHour ? `5-hour limit: ${describeWindow(meters.fiveHour)}${formatResetSuffix(meters.limitsSession?.fiveHourLimit?.resetsAt, nowMs)}` : '',
       meters.weekly ? `Weekly limit: ${describeWindow(meters.weekly)}${formatResetSuffix(meters.limitsSession?.weeklyLimit?.resetsAt, nowMs)}` : '',
       meters.liveSession?.costUsd === undefined ? '' : `Session cost: ${viewModel.formatUsd(meters.liveSession.costUsd)}`,
-      todayTokens ? `Today: ${viewModel.formatTokens(todayTokens)} tokens` : '',
+      todayTokens ? `Today: ${viewModel.formatTokens(todayTokens)} tokens · ${todayCostUsd === undefined ? '--' : viewModel.formatUsd(todayCostUsd)}` : '',
       meters.isStale ? '_Live data is stale: send a message in Claude Code to refresh._' : '',
-      this.hasLiveFeed() ? '' : '_Live meters are off. Run "Complementer: Enable live meters" for exact values._',
+      this.hasLiveFeed() ? '' : `Live meters are off. [Turn on live meters](command:${CONFIG_SECTION}.enableLive) for exact values.`,
     ];
     tooltip.appendMarkdown(lines.filter(Boolean).join('\n\n'));
     return tooltip;
@@ -298,8 +353,9 @@ class ComplementerExtension {
       chats: this.chatIndex.chats,
       workspaceFolders: this.workspaceFolders(),
       skillSessions: this.skillHistory.sessions,
+      sessionCosts: this.sessionCosts,
       windowSizes: this.windowSizes,
-      insights: viewModel.computeInsights(this.history.days, new Date(), this.skillHistory.days),
+      insights: viewModel.computeInsights(this.history.days, new Date(), this.skillHistory.days, this.dayCosts),
       breakdown: viewModel.computeBreakdown(this.sessionTally, meters.contextWindowSize),
       sessionSkills: viewModel.topSessionSkills(this.sessionTally.skillCounts),
       selectedSessionId: this.selectedSessionId,
@@ -337,8 +393,8 @@ class ComplementerExtension {
         this.lastPostedJson = ''; // a fresh webview has nothing yet
         this.postPanel();
         break;
-      case 'new':
-        this.startNewSession();
+      case 'newChat':
+        this.startNewChat();
         break;
       case 'select':
         this.selectedSessionId = typeof message.id === 'string' ? message.id : undefined;
@@ -391,7 +447,7 @@ class ComplementerExtension {
   }
 
   /** `newConversation` only pings an already-open chat, so open a fresh Claude panel instead. */
-  async startNewSession() {
+  async startNewChat() {
     this.selectedSessionId = undefined; // follow the new session once it starts reporting
     this.renderStatusBar();
     try {
@@ -439,6 +495,10 @@ class ComplementerExtension {
     if (choice !== confirmLabel) return;
     if (!(isPermanent ? await this.removePermanently(existingPaths) : await this.removeToTrashOrAsk(existingPaths))) return;
     this.liveFeed.states.delete(chat.id + '.json');
+    if (chat.id in this.sessionCosts) {
+      delete this.sessionCosts[chat.id];
+      this.saveCosts('session-costs.json', this.sessionCosts, false);
+    }
     fsPromises.rm(path.join(this.storageDirectory, 'live', chat.id + '.json'), { force: true }).catch(() => {});
     if (this.selectedSessionId === chat.id) this.selectedSessionId = undefined;
     await this.chatIndex.update();
@@ -524,20 +584,20 @@ class ComplementerExtension {
    * fresh one instead (an Activate helper that never becomes the followed session). It never answers a trust prompt:
    * if nothing arrives in time the terminal stays open for the user. One run at a time: a second click does nothing.
    */
-  async refreshLimits() {
+  async refreshLimits(targetChat?: Chat) {
     if (this.isRefreshingLimits) return;
     this.isRefreshingLimits = true;
     try {
-      await this.refreshLimitsInTerminal();
+      await this.refreshLimitsInTerminal(targetChat);
     } finally {
       this.isRefreshingLimits = false;
     }
   }
 
-  async refreshLimitsInTerminal() {
+  async refreshLimitsInTerminal(targetChat?: Chat) {
     if (!this.hasLiveFeed()) await this.enableLiveMeters();
     if (!this.hasLiveFeed()) return;
-    const { chat } = this.computeMeters();
+    const chat = targetChat ?? this.computeMeters().chat;
     const resumedChat = chat && UUID_PATTERN.test(chat.id) ? chat : undefined;
     if (resumedChat && Date.now() - resumedChat.modifiedAtMs < REFRESH_RESUME_BUSY_MS && !(await this.confirmResume(resumedChat))) return;
     const terminal = vscode.window.createTerminal({ name: 'Claude (refresh limits)', cwd: resumedChat?.workingDirectory ?? this.workspaceFolders()[0] ?? os.homedir() });
@@ -584,18 +644,23 @@ class ComplementerExtension {
 
   /**
    * Ask Claude Code for the plan limits (see usage.ts) so the chat panel needs no terminal. A success is stored like a
-   * live payload with no folder, so it feeds the limits only. On failure nothing changes: the data ages into "stale"
-   * and the ↻ button in the panel still refreshes through a terminal.
+   * live payload with no folder, so it feeds the limits only, and saved in live/ so other windows reuse it instead of
+   * starting their own `claude`. On failure nothing changes: the data ages into "stale" and the ↻ button in the panel
+   * still refreshes through a terminal.
+   * @param maxAgeMs Skip when an answer (from any window) is younger than this.
    */
-  async refreshUsageLimits() {
+  async refreshUsageLimits(maxAgeMs = USAGE_QUERY_MIN_GAP_MS) {
     if (this.isQueryingUsage) return;
+    const shared = this.liveFeed.states.get(USAGE_QUERY_FILE);
+    if (shared && Date.now() - shared.updatedAt < maxAgeMs) return;
     this.isQueryingUsage = true;
     this.lastUsageQueryMs = Date.now();
     try {
       const binaryPath = await this.findClaudeBinary();
       const limits = binaryPath ? await queryUsage(binaryPath, this.storageDirectory) : undefined;
       if (!limits) return;
-      this.liveFeed.states.set('usage-query.json', { sessionId: 'usage-query', workingDirectory: '', ...limits, updatedAt: Date.now() });
+      this.liveFeed.states.set(USAGE_QUERY_FILE, { sessionId: 'usage-query', workingDirectory: '', ...limits, updatedAt: Date.now() });
+      writeAtomic(path.join(this.storageDirectory, 'live', USAGE_QUERY_FILE), JSON.stringify({ session_id: 'usage-query', rate_limits: { five_hour: toPayloadLimit(limits.fiveHourLimit), seven_day: toPayloadLimit(limits.weeklyLimit) } })).catch(() => {});
       this.requestRefresh();
     } finally {
       this.isQueryingUsage = false;
@@ -660,18 +725,69 @@ class ComplementerExtension {
     if (this.chatIndexTimer) return;
     this.chatIndexTimer = setTimeout(() => {
       this.chatIndexTimer = undefined;
-      this.chatIndex.update().then(() => this.requestRefresh());
+      this.chatIndex.update().then(() => {
+        this.pruneSessionCosts();
+        this.noteNewChats();
+        this.requestRefresh();
+      });
     }, delayMs);
+  }
+
+  /** A chat that appears after startup is a new session: queue it to be activated once, so its meters load without the user clicking Refresh. */
+  noteNewChats() {
+    const { chats } = this.chatIndex;
+    const known = this.knownChatIds;
+    this.knownChatIds = new Set(chats.map((chat) => chat.id));
+    if (!known) return;
+    for (const chat of chats) {
+      if (!known.has(chat.id) && UUID_PATTERN.test(chat.id) && !this.activationSessionIds.has(chat.id) && this.workspaceFolders().some((folder) => isWithin(chat.workingDirectory, folder))) this.chatsAwaitingActivation.add(chat.id);
+    }
+    this.watchNewChats();
+  }
+
+  /** Check the queue every couple of seconds until it is empty (the 60 s poll alone would make "10 seconds quiet" a minute). */
+  watchNewChats() {
+    if (this.newChatTimer || !this.chatsAwaitingActivation.size) return;
+    this.newChatTimer = setTimeout(() => {
+      this.newChatTimer = undefined;
+      this.activateNewChats();
+      this.watchNewChats();
+    }, NEW_CHAT_CHECK_MS);
+  }
+
+  /** Once a queued chat has been quiet for 10 seconds (its first reply is done) and has no live payload, load its meters once: ask first, unless the setting says auto. */
+  activateNewChats() {
+    if (this.isRefreshingLimits) return;
+    for (const id of this.chatsAwaitingActivation) {
+      const chat = this.chatIndex.chats.find((candidate) => candidate.id === id);
+      if (!chat || this.liveFeed.states.has(`${id}.json`)) this.chatsAwaitingActivation.delete(id);
+      else if (Date.now() - chat.modifiedAtMs >= ACTIVATE_NEW_CHAT_IDLE_MS) {
+        this.chatsAwaitingActivation.delete(id);
+        this.activateNewChat(chat);
+        return;
+      }
+    }
+  }
+
+  async activateNewChat(chat: Chat) {
+    const mode = vscode.workspace.getConfiguration(CONFIG_SECTION).get<string>('autoActivateNewChats', 'ask');
+    if (mode === 'off') return;
+    const answer = await vscode.window.showInformationMessage(`New chat "${chat.title}": load its context and limits? This resumes it once in a terminal and sends "hi".`, 'Load');
+    if (answer === 'Load') this.refreshLimits(chat);
   }
 
   /** A fallback for when watching misses something: stat-only for unchanged files. */
   poll() {
-    this.scanLogs().then((hadNewData) => this.onScanComplete(hadNewData));
+    if (!this.logWatcher || ++this.pollTicks % LOG_POLL_EVERY_TICKS === 0) this.scanLogs().then((hadNewData) => this.onScanComplete(hadNewData));
     this.refreshAccount();
     this.refreshLiveEnabled();
+    this.activateNewChats();
     if (!this.liveFeed.watcher) this.liveFeed.reloadAll().then(() => this.requestRefresh());
   }
 }
+
+/** A limit in the shape of a statusLine payload, which LiveFeed already reads. */
+const toPayloadLimit = (limit: Limit | undefined) => limit && { used_percentage: limit.percent, resets_at: limit.resetsAt };
 
 function reportsWindowSize(state: LiveState): state is WindowSizeReport {
   return Boolean(state.modelId && state.contextWindowSize);
