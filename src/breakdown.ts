@@ -1,10 +1,9 @@
 // One session log -> running sizes of what fills its context. Sizes and names only: chat text is never kept.
 // Sizes are measured in characters; view-model.ts scales them to the measured growth in tokens.
-import { promises as fsPromises } from 'node:fs';
 import type { ContentKind, SessionTally } from './types';
 import { ASSISTANT_NEEDLE, USER_NEEDLE, ATTACHMENT_NEEDLE, NAME_PATTERN, CONTENT_KINDS } from './consts';
-import { iterateLineBatches } from './logs';
-import { tryParseJson, toNonNegativeNumber, incrementCount } from './utils';
+import { readNewLines } from './logs';
+import { tryParseJson, sumContextTokens, incrementCount } from './utils';
 
 export function createSessionTally(): SessionTally {
   return {
@@ -37,7 +36,7 @@ function forgetSizes(tally: SessionTally) {
 }
 
 function recordContextTokens(tally: SessionTally, usage: any) {
-  const total = toNonNegativeNumber(usage?.input_tokens) + toNonNegativeNumber(usage?.cache_creation_input_tokens) + toNonNegativeNumber(usage?.cache_read_input_tokens);
+  const total = sumContextTokens(usage);
   if (!total) return;
   if (tally.latestTokens !== undefined && total < tally.latestTokens) forgetSizes(tally);
   tally.baselineTokens = tally.baselineTokens ?? total;
@@ -103,17 +102,16 @@ const isContentLine = (line: Buffer): boolean => [ASSISTANT_NEEDLE, USER_NEEDLE,
  * Read what the log gained since the last call.
  * @returns true if new complete lines were read
  */
-export async function readSessionTally(filePath: string, tally: SessionTally): Promise<boolean> {
-  const { size: fileSize } = await fsPromises.stat(filePath); // unchanged logs are never opened
-  if (fileSize < tally.offset) Object.assign(tally, createSessionTally()); // truncated or replaced: start over
-  if (fileSize === tally.offset) return false;
-  const offsetBefore = tally.offset;
-  for await (const lines of iterateLineBatches(filePath, tally)) {
-    for (const line of lines) {
-      if (!isContentLine(line)) continue;
-      const entry = tryParseJson(line.toString('utf8'));
+export const readSessionTally = (filePath: string, tally: SessionTally): Promise<boolean> =>
+  readNewLines(
+    filePath,
+    tally,
+    isContentLine,
+    (text) => {
+      const entry = tryParseJson(text);
       if (entry) addEntry(tally, entry);
-    }
-  }
-  return tally.offset !== offsetBefore;
-}
+    },
+    () => {
+      Object.assign(tally, createSessionTally()); // truncated or replaced: start over
+    },
+  );

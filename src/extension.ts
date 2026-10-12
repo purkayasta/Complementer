@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import { History, Scanner, listLogFiles, toDayKey, dropOldDays } from './logs';
-import { LiveFeed, isWithin, readAccountIfChanged } from './live';
+import { LiveFeed, isInWorkspace, readAccountIfChanged } from './live';
 import { ChatIndex, renderTranscript, getSessionPaths } from './chats';
 import { SkillHistory } from './skills';
 import { createSessionTally, readSessionTally } from './breakdown';
@@ -13,8 +13,8 @@ import { queryUsage } from './usage';
 import * as setup from './setup';
 import * as viewModel from './view-model';
 import type { Account, Chat, Limit, LiveState, Meters, PanelMessage, SessionTally, SetupPaths, WindowSizeReport, WindowState } from './types';
-import { USAGE_QUERY_MIN_GAP_MS, USAGE_QUERY_INTERVAL_MS, USAGE_QUERY_FILE, LOG_POLL_EVERY_TICKS, REFRESH_LIMITS_WAIT_MS, REFRESH_LIMITS_POLL_MS, REFRESH_LIMITS_CLOSE_MS, REFRESH_RESUME_BUSY_MS, ACTIVATE_NEW_CHAT_IDLE_MS, NEW_CHAT_CHECK_MS, VIEWS_DIRECTORY, CONFIG_SECTION, CHAT_SCHEME, CLAUDE_OPEN_COMMAND, UUID_PATTERN, REFRESH_DEBOUNCE_MS, SCAN_DEBOUNCE_MS, SAVE_DEBOUNCE_MS, POLL_INTERVAL_MS, CLOCK_TICK_MS, ACTIVE_SESSION_MS } from './consts';
-import { tryReadText, pathExists, filterExistingPaths, tryParseJson, errorMessage, writeAtomic, writeCosts } from './utils';
+import { CHAT_INDEX_THROTTLE_MS, USAGE_QUERY_MIN_GAP_MS, USAGE_QUERY_INTERVAL_MS, USAGE_QUERY_FILE, LOG_POLL_EVERY_TICKS, REFRESH_LIMITS_WAIT_MS, REFRESH_LIMITS_POLL_MS, REFRESH_LIMITS_CLOSE_MS, REFRESH_RESUME_BUSY_MS, ACTIVATE_NEW_CHAT_IDLE_MS, NEW_CHAT_CHECK_MS, VIEWS_DIRECTORY, CONFIG_SECTION, CHAT_SCHEME, CLAUDE_OPEN_COMMAND, UUID_PATTERN, REFRESH_DEBOUNCE_MS, SCAN_DEBOUNCE_MS, SAVE_DEBOUNCE_MS, POLL_INTERVAL_MS, CLOCK_TICK_MS, ACTIVE_SESSION_MS } from './consts';
+import { tryReadText, pathExists, filterExistingPaths, tryParseJson, errorMessage, writeAtomic, writeCosts, createQueue, createTimer } from './utils';
 
 // The compiled folder holds the hook script and the panel's files next to this one, wherever the extension is installed.
 
@@ -52,15 +52,21 @@ class ComplementerExtension {
   /** The log `sessionTally` belongs to. */
   sessionTallyPath: string | undefined;
 
-  pendingTallyReads: Promise<unknown> = Promise.resolve();
+  readonly #enqueueTallyRead = createQueue();
 
-  refreshTimer: NodeJS.Timeout | undefined;
+  readonly refreshTimer = createTimer(() => this.renderStatusBar(), REFRESH_DEBOUNCE_MS);
 
-  scanTimer: NodeJS.Timeout | undefined;
+  readonly scanTimer = createTimer(() => this.scanChangedLogs(), SCAN_DEBOUNCE_MS);
 
-  saveTimer: NodeJS.Timeout | undefined;
+  readonly saveTimer = createTimer(() => this.flushHistory(), SAVE_DEBOUNCE_MS);
 
-  chatIndexTimer: NodeJS.Timeout | undefined;
+  readonly chatIndexTimer = createTimer(() => this.indexChats(), CHAT_INDEX_THROTTLE_MS);
+
+  /** Checks the queue of new chats every couple of seconds until it is empty (the 60 s poll alone would make "10 seconds quiet" a minute). */
+  readonly newChatTimer = createTimer(() => {
+    this.activateNewChats();
+    this.watchNewChats();
+  }, NEW_CHAT_CHECK_MS);
 
   pollTimer: NodeJS.Timeout | undefined;
 
@@ -74,9 +80,9 @@ class ComplementerExtension {
 
   isRefreshingLimits = false;
 
-  /** Session id -> the highest cost Claude Code reported for it (session-costs.json); lets a row keep its cost after the live file is gone. */
-  pendingCostSaves: Promise<unknown> = Promise.resolve();
+  readonly #enqueueFileWrite = createQueue();
 
+  /** Session id -> the highest cost Claude Code reported for it (session-costs.json); lets a row keep its cost after the live file is gone. */
   sessionCosts: Record<string, number> = {};
 
   /** Local day -> cost Claude Code reported live that day (day-costs.json), for the Insights Cost tile. */
@@ -86,8 +92,6 @@ class ComplementerExtension {
   knownChatIds: Set<string> | undefined;
 
   chatsAwaitingActivation = new Set<string>();
-
-  newChatTimer: NodeJS.Timeout | undefined;
 
   lastUsageQueryMs = 0;
 
@@ -175,14 +179,14 @@ class ComplementerExtension {
     this.scanLogs().then(async (hadNewData) => {
       this.onScanComplete(hadNewData); // the first catch-up runs off the activation path
       await this.history.dropIdleLastResponses(Date.now());
-      this.saveTimer ||= setTimeout(() => this.flushHistory(), SAVE_DEBOUNCE_MS);
+      this.saveTimer.schedule();
     });
-    this.scheduleChatIndexing(500);
+    this.chatIndexTimer.schedule(false, 500);
   }
 
   dispose() {
     this.logWatcher?.close();
-    for (const timer of [this.refreshTimer, this.scanTimer, this.saveTimer, this.chatIndexTimer, this.newChatTimer]) clearTimeout(timer);
+    for (const timer of [this.refreshTimer, this.scanTimer, this.saveTimer, this.chatIndexTimer, this.newChatTimer]) timer.cancel();
     clearInterval(this.pollTimer);
     clearInterval(this.clockTimer);
     clearInterval(this.usageTimer);
@@ -219,7 +223,7 @@ class ComplementerExtension {
     const newReports = [...this.liveFeed.states.values()].filter(reportsWindowSize).filter((report) => this.windowSizes[report.modelId] !== report.contextWindowSize);
     if (!newReports.length) return;
     for (const report of newReports) this.windowSizes[report.modelId] = report.contextWindowSize;
-    writeAtomic(path.join(this.storageDirectory, 'windows.json'), JSON.stringify(this.windowSizes)).catch(() => {});
+    this.#enqueueFileWrite(() => writeAtomic(path.join(this.storageDirectory, 'windows.json'), JSON.stringify(this.windowSizes))).catch(() => {});
   }
 
   /** Keep the cost each session reports live, so its row can show it later. Only real costs of known sessions are saved. */
@@ -232,7 +236,7 @@ class ComplementerExtension {
 
   /** One at a time, so two saves never share a temporary file. Pass shouldMerge false after removing entries, or the merge would bring them back. */
   saveCosts(fileName: string, costs: Record<string, number>, shouldMerge = true) {
-    this.pendingCostSaves = this.pendingCostSaves.then(() => writeCosts(path.join(this.storageDirectory, fileName), costs, shouldMerge)).catch(() => {});
+    this.#enqueueFileWrite(() => writeCosts(path.join(this.storageDirectory, fileName), costs, shouldMerge)).catch(() => {});
   }
 
   /** Forget the costs of sessions whose log is gone. Never with an empty index (the listing may have failed), nor for sessions still reporting live (their cost would be added to the day again). */
@@ -279,8 +283,7 @@ class ComplementerExtension {
   // ---- rendering ----
 
   requestRefresh() {
-    clearTimeout(this.refreshTimer);
-    this.refreshTimer = setTimeout(() => this.renderStatusBar(), REFRESH_DEBOUNCE_MS);
+    this.refreshTimer.schedule(true);
   }
 
   renderStatusBar() {
@@ -335,8 +338,7 @@ class ComplementerExtension {
     const filePath = this.sessionTallyPath;
     if (!filePath) return;
     const { sessionTally } = this;
-    this.pendingTallyReads = this.pendingTallyReads
-      .then(() => readSessionTally(filePath, sessionTally))
+    this.#enqueueTallyRead(() => readSessionTally(filePath, sessionTally))
       .then((hadNewData) => hadNewData && this.requestRefresh())
       .catch(() => {}); // the log may have vanished; the next refresh tries again
   }
@@ -660,7 +662,8 @@ class ComplementerExtension {
       const limits = binaryPath ? await queryUsage(binaryPath, this.storageDirectory) : undefined;
       if (!limits) return;
       this.liveFeed.states.set(USAGE_QUERY_FILE, { sessionId: 'usage-query', workingDirectory: '', ...limits, updatedAt: Date.now() });
-      writeAtomic(path.join(this.storageDirectory, 'live', USAGE_QUERY_FILE), JSON.stringify({ session_id: 'usage-query', rate_limits: { five_hour: toPayloadLimit(limits.fiveHourLimit), seven_day: toPayloadLimit(limits.weeklyLimit) } })).catch(() => {});
+      const sharedPayload = JSON.stringify({ session_id: 'usage-query', rate_limits: { five_hour: toPayloadLimit(limits.fiveHourLimit), seven_day: toPayloadLimit(limits.weeklyLimit) } });
+      this.#enqueueFileWrite(() => writeAtomic(path.join(this.storageDirectory, 'live', USAGE_QUERY_FILE), sharedPayload)).catch(() => {});
       this.requestRefresh();
     } finally {
       this.isQueryingUsage = false;
@@ -684,7 +687,7 @@ class ComplementerExtension {
       this.logWatcher = fs.watch(this.projectsRoot, { recursive: true }, (_eventType, relativePath) => {
         if (!relativePath?.endsWith('.jsonl')) return;
         this.changedLogFiles.add(path.join(this.projectsRoot, relativePath));
-        this.scanTimer ||= setTimeout(() => this.scanChangedLogs(), SCAN_DEBOUNCE_MS);
+        this.scanTimer.schedule();
       });
       this.logWatcher.on('error', () => {});
     } catch {
@@ -703,7 +706,6 @@ class ComplementerExtension {
   }
 
   scanChangedLogs() {
-    this.scanTimer = undefined;
     const changedFiles = [...this.changedLogFiles];
     this.changedLogFiles.clear();
     this.scanLogs(changedFiles).then((hadNewData) => this.onScanComplete(hadNewData));
@@ -713,24 +715,17 @@ class ComplementerExtension {
     if (!hadNewData) return;
     if (Date.now() - this.lastUsageQueryMs >= USAGE_QUERY_MIN_GAP_MS) this.refreshUsageLimits(); // new messages moved the limits
     this.requestRefresh();
-    this.scheduleChatIndexing();
-    clearTimeout(this.saveTimer);
-    this.saveTimer = setTimeout(() => this.flushHistory(), SAVE_DEBOUNCE_MS);
+    this.chatIndexTimer.schedule();
+    this.saveTimer.schedule(true);
   }
 
-  /**
-   * Coalesce: if a run is already pending, keep it. The default delay grows when the active log is huge.
-   */
-  scheduleChatIndexing(delayMs: number = viewModel.chatIndexDelayMs(this.chatIndex.largestRecentLogBytes(Date.now(), ACTIVE_SESSION_MS))) {
-    if (this.chatIndexTimer) return;
-    this.chatIndexTimer = setTimeout(() => {
-      this.chatIndexTimer = undefined;
-      this.chatIndex.update().then(() => {
-        this.pruneSessionCosts();
-        this.noteNewChats();
-        this.requestRefresh();
-      });
-    }, delayMs);
+  /** Coalesce: if a run is already pending, keep it. */
+  indexChats() {
+    this.chatIndex.update().then(() => {
+      this.pruneSessionCosts();
+      this.noteNewChats();
+      this.requestRefresh();
+    });
   }
 
   /** A chat that appears after startup is a new session: queue it to be activated once, so its meters load without the user clicking Refresh. */
@@ -740,19 +735,13 @@ class ComplementerExtension {
     this.knownChatIds = new Set(chats.map((chat) => chat.id));
     if (!known) return;
     for (const chat of chats) {
-      if (!known.has(chat.id) && UUID_PATTERN.test(chat.id) && !this.activationSessionIds.has(chat.id) && this.workspaceFolders().some((folder) => isWithin(chat.workingDirectory, folder))) this.chatsAwaitingActivation.add(chat.id);
+      if (!known.has(chat.id) && UUID_PATTERN.test(chat.id) && !this.activationSessionIds.has(chat.id) && isInWorkspace(chat.workingDirectory, this.workspaceFolders())) this.chatsAwaitingActivation.add(chat.id);
     }
     this.watchNewChats();
   }
 
-  /** Check the queue every couple of seconds until it is empty (the 60 s poll alone would make "10 seconds quiet" a minute). */
   watchNewChats() {
-    if (this.newChatTimer || !this.chatsAwaitingActivation.size) return;
-    this.newChatTimer = setTimeout(() => {
-      this.newChatTimer = undefined;
-      this.activateNewChats();
-      this.watchNewChats();
-    }, NEW_CHAT_CHECK_MS);
+    if (this.chatsAwaitingActivation.size) this.newChatTimer.schedule();
   }
 
   /** Once a queued chat has been quiet for 10 seconds (its first reply is done) and has no live payload, load its meters once: ask first, unless the setting says auto. */

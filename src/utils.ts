@@ -25,7 +25,7 @@ export async function pathExists(filePath: string): Promise<boolean> {
 /** The paths that exist, in the same order. */
 export async function filterExistingPaths(filePaths: string[]): Promise<string[]> {
   const exists = await Promise.all(filePaths.map(pathExists));
-  return filePaths.filter((filePath, index) => exists[index]);
+  return filePaths.filter((_unused, index) => exists[index]);
 }
 
 /** Parse JSON without throwing, so callers can stay `const` instead of wrapping try/catch around a `let`. Undefined if the text is not valid JSON. */
@@ -65,6 +65,41 @@ export const toFiniteNumber = (value: unknown) => (typeof value === 'number' && 
 /** @param error Anything a catch block can receive. */
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Input plus cache tokens of a raw `usage` object: what the context window holds. Bad values count as 0. */
+export const sumContextTokens = (usage: any): number => toNonNegativeNumber(usage?.input_tokens) + toNonNegativeNumber(usage?.cache_creation_input_tokens) + toNonNegativeNumber(usage?.cache_read_input_tokens);
+
+/** Run tasks one after another. A failed task rejects its own caller only; the next one still runs. */
+export function createQueue() {
+  const queue: { tail: Promise<unknown> } = { tail: Promise.resolve() };
+  return <T>(task: () => Promise<T>): Promise<T> => {
+    const result = queue.tail.then(task);
+    queue.tail = result.catch(() => {});
+    return result;
+  };
+}
+
+/** A timer that can be armed again and again. A pending run is kept (so a burst of events makes one run), or pushed back with `restart`. */
+export function createTimer(action: () => void, delayMs: number) {
+  const timer: { handle: NodeJS.Timeout | undefined } = { handle: undefined };
+  return {
+    get isPending() {
+      return timer.handle !== undefined;
+    },
+    schedule(restart = false, delayOverrideMs = delayMs) {
+      if (timer.handle && !restart) return;
+      clearTimeout(timer.handle);
+      timer.handle = setTimeout(() => {
+        timer.handle = undefined;
+        action();
+      }, delayOverrideMs);
+    },
+    cancel() {
+      clearTimeout(timer.handle);
+      timer.handle = undefined;
+    },
+  };
 }
 
 /** Add to a named counter. The own-property check keeps names like "constructor" from reading the prototype. */

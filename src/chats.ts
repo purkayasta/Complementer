@@ -2,7 +2,7 @@
 // "ai-title" records. Only logs still on disk can be listed; Claude Code deletes old ones.
 import { promises as fsPromises } from 'node:fs';
 import path from 'node:path';
-import { listLogFiles, parseUsageLine, iterateLineBatches, readLines } from './logs';
+import { listLogFiles, parseUsageLine, iterateLineBatches } from './logs';
 import type { Chat } from './types';
 import { USAGE_NEEDLE, TITLE_NEEDLE, WORKING_DIRECTORY_NEEDLE, USER_NEEDLE, ASSISTANT_NEEDLE, SIDECHAIN_NEEDLE, SYNTHETIC_NEEDLE, UUID_PATTERN, MAX_PROMPT_LINES_TO_TRY, MAX_TITLE_LENGTH, MAX_WORKING_DIRECTORY_BYTES } from './consts';
 import { tryParseJson, truncate } from './utils';
@@ -37,6 +37,12 @@ class LogFindings {
     }
   }
 
+  /** Copy the kept lines out of the read chunks, so a log that is only remembered does not keep its 1 MB chunks alive. */
+  detach() {
+    this.lastUsageLine &&= Buffer.from(this.lastUsageLine);
+    this.lastTitleLine &&= Buffer.from(this.lastTitleLine);
+  }
+
   /** Claude Code's title, else the first prompt, else "(untitled)". */
   get title(): string {
     const aiTitle = this.lastTitleLine && tryParseJson(this.lastTitleLine.toString('utf8'))?.aiTitle;
@@ -44,19 +50,31 @@ class LogFindings {
   }
 }
 
-async function indexChatLog(filePath: string, modifiedAtMs: number): Promise<Chat> {
-  const findings = new LogFindings();
-  for await (const lines of iterateLineBatches(filePath, { offset: 0 })) lines.forEach((line) => findings.observe(line));
+/** What is known of one log: logs only grow at the end, so the findings and the read position carry over to the next update. */
+interface IndexedLog {
+  sizeBytes: number;
+  modifiedAtMs: number;
+  cursor: { offset: number };
+  findings: LogFindings;
+  chat: Chat;
+}
+
+/** Read what the log gained since `previous` (all of it for a new or shrunk log) and describe the chat. */
+async function indexChatLog(filePath: string, stats: { size: number; mtimeMs: number }, previous: IndexedLog | undefined): Promise<IndexedLog> {
+  const { cursor, findings } = previous && stats.size >= previous.cursor.offset ? previous : { cursor: { offset: 0 }, findings: new LogFindings() };
+  for await (const lines of iterateLineBatches(filePath, cursor)) lines.forEach((line) => findings.observe(line));
+  findings.detach();
   const lastUsage = findings.lastUsageLine && parseUsageLine(findings.lastUsageLine.toString('utf8'));
-  return {
+  const chat: Chat = {
     id: path.basename(filePath, '.jsonl'),
     filePath,
     workingDirectory: findings.workingDirectory,
     title: findings.title,
-    modifiedAtMs,
+    modifiedAtMs: stats.mtimeMs,
     contextTokens: lastUsage ? lastUsage.inputTokens + lastUsage.cacheCreationTokens + lastUsage.cacheReadTokens : undefined,
     modelId: lastUsage?.modelId,
   };
+  return { sizeBytes: stats.size, modifiedAtMs: stats.mtimeMs, cursor, findings, chat };
 }
 
 /** The project folder named in a log line, or '' if the line has none. */
@@ -70,19 +88,14 @@ function readWorkingDirectory(line: Buffer) {
 
 export class ChatIndex {
   /** Keyed by log path. */
-  indexedLogs = new Map<string, { sizeBytes: number; modifiedAtMs: number; chat: Chat }>();
+  indexedLogs = new Map<string, IndexedLog>();
 
   /** Rebuilt once per update, so readers never rebuild it. */
   chats: Chat[] = [];
 
   constructor(private readonly projectsRoot: string) {}
 
-  /** Size of the biggest log that changed recently: re-indexing reads the whole file, so only a big, growing log is costly. */
-  largestRecentLogBytes(nowMs: number, recentMs: number): number {
-    return Math.max(0, ...[...this.indexedLogs.values()].filter((indexed) => nowMs - indexed.modifiedAtMs < recentMs).map((indexed) => indexed.sizeBytes));
-  }
-
-  /** Re-index only logs whose size or modification time changed; drops deleted ones. Subagent logs are not chats. */
+  /** Re-index only logs whose size or modification time changed, reading only what they gained; drops deleted ones. Subagent logs are not chats. */
   async update() {
     const logFiles = (await listLogFiles(this.projectsRoot)).filter((filePath) => !filePath.includes(`${path.sep}subagents${path.sep}`));
     const existingLogs = new Set(logFiles);
@@ -92,7 +105,7 @@ export class ChatIndex {
         const stats = await fsPromises.stat(filePath);
         const indexed = this.indexedLogs.get(filePath);
         if (indexed && indexed.sizeBytes === stats.size && indexed.modifiedAtMs === stats.mtimeMs) continue;
-        this.indexedLogs.set(filePath, { sizeBytes: stats.size, modifiedAtMs: stats.mtimeMs, chat: await indexChatLog(filePath, stats.mtimeMs) });
+        this.indexedLogs.set(filePath, await indexChatLog(filePath, stats, indexed));
       } catch {
         this.indexedLogs.delete(filePath); // vanished mid-update
       }
@@ -124,8 +137,10 @@ export function getSessionPaths(claudeDirectory: string, chat: Chat): string[] {
 
 /** Markdown transcript of one chat. Long tool output is cut; thinking and bookkeeping records are left out. */
 export async function renderTranscript(filePath: string): Promise<string> {
-  const conversationLines = await readLines(filePath, (line) => line.includes(USER_NEEDLE) || line.includes(ASSISTANT_NEEDLE));
-  const markdownBlocks = conversationLines.flatMap((line) => entryToMarkdown(tryParseJson(line.toString('utf8'))));
+  const markdownBlocks: string[] = []; // each line becomes markdown as its batch arrives, so the log itself is never held in memory
+  for await (const lines of iterateLineBatches(filePath, { offset: 0 })) {
+    for (const line of lines) if (line.includes(USER_NEEDLE) || line.includes(ASSISTANT_NEEDLE)) markdownBlocks.push(...entryToMarkdown(tryParseJson(line.toString('utf8'))));
+  }
   return markdownBlocks.length ? markdownBlocks.join('\n') : '_No readable messages in this log._';
 }
 

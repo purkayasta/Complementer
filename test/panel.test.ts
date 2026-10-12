@@ -205,6 +205,17 @@ test('groups: same-named folders stay apart, the followed session opens its grou
   assert.strictEqual(onlyHeader.listeners.click, undefined); // and nothing to toggle while searching
 });
 
+test('the project dropdown keeps its options (an open list would close) until the projects change', async () => {
+  const { elementsById, sendState } = await loadPanel();
+  const chat = (id: string, projectPath: string) => ({ id, title: id, projectName: projectPath.slice(1), projectPath, isInWorkspace: false, modifiedAtMs: Date.now() });
+  sendState({ ...STATE, chats: [chat('one', '/a')] });
+  const firstOptions = elementsById['project-filter'].children;
+  sendState({ ...STATE, chats: [chat('one', '/a')] }); // same projects, a new message
+  assert.strictEqual(elementsById['project-filter'].children, firstOptions);
+  sendState({ ...STATE, chats: [chat('one', '/a'), chat('two', '/b')] });
+  assert.strictEqual(elementsById['project-filter'].children.length, 3); // All projects, a, b
+});
+
 test('panel shows empty states without crashing', async () => {
   const { elementsById, sendState } = await loadPanel();
   sendState({ usage: { isStale: false, isLiveOff: true, note: 'Live meters are off.' }, chats: [], insights: { days: [dayInsight(11, 0)], ranges: { 1: RANGE, 7: RANGE, 30: RANGE }, streakDays: 0 } });

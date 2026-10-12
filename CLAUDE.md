@@ -85,6 +85,8 @@ test/                   *.test.ts plus helpers.ts; extension.test.ts runs the re
 
 `README.md` is also the Marketplace page: keep it short and about what the extension adds, no developer notes (those go in `CONTRIBUTING.md`). Update `CHANGELOG.md` per release, and the spec and roadmap when behaviour changes.
 
+Every image that ships in the .vsix (`media/*.png` screenshots and `resources/icon.png`; `icon.svg` is already tiny) must be compressed before packaging, including any new one (screenshots show at 340px, so quality loss is not visible; the icon stays 256x256). Without `pngquant`/`oxipng`, quantize to 256 colours with Pillow: `Image.open(p).convert("RGBA").quantize(256, method=Image.Quantize.FASTOCTREE, dither=Image.Dither.NONE).save(p, optimize=True)`. 1.2.0 went from 417 KB to 160 KB this way (icon 28 KB to 6 KB on top of that). The package is otherwise near minimal (whitelisted `.vscodeignore`, no dependencies); do not add a bundler just to shrink it.
+
 ## Git
 
 Use Conventional Commits (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`), imperative and lowercase subject under about 72 characters, with a short body explaining why when it is not obvious. Keep commits focused. Do not commit or push without being asked.

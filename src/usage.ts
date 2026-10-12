@@ -9,7 +9,7 @@ import { USAGE_QUERY_TIMEOUT_MS } from './consts';
 
 const REQUEST_ID = 'complementer-usage';
 
-export interface UsageLimits {
+interface UsageLimits {
   fiveHourLimit?: Limit;
   weeklyLimit?: Limit;
 }
@@ -24,11 +24,11 @@ function toLimit(window: any): Limit | undefined {
 
 /** The limits in the reply to our request among the lines `claude` printed, or undefined if there are none. */
 export function parseUsageOutput(output: string): UsageLimits | undefined {
-  const replies = output
+  const reply = output
     .split('\n')
     .map((line) => tryParseJson(line))
-    .filter((message) => message?.type === 'control_response' && message.response?.request_id === REQUEST_ID && message.response.subtype === 'success');
-  const rateLimits = replies[0]?.response?.response?.rate_limits;
+    .find((message) => message?.type === 'control_response' && message.response?.request_id === REQUEST_ID && message.response.subtype === 'success');
+  const rateLimits = reply?.response?.response?.rate_limits;
   const limits = { fiveHourLimit: toLimit(rateLimits?.five_hour), weeklyLimit: toLimit(rateLimits?.seven_day) };
   return limits.fiveHourLimit || limits.weeklyLimit ? limits : undefined;
 }

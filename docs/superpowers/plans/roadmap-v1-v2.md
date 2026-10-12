@@ -25,7 +25,7 @@ Companion to `../specs/complementer-design.md`, which describes what is built. v
 | 15 | Code quality pass: descriptive names, `const`-first, no sync I/O, types in `src/types.ts`, constants in `src/consts.ts`, pure `view-model.ts`, class-based `extension.ts`, ESLint enforced | Done |
 | 16 | New icon (spark inside a gauge), packaging into `release/`, README, `CLAUDE.md`, MIT license | Done |
 | 17 | Permanent delete (✕ button, own confirmation); restored logs are not recounted; uninstall restores the user's status line | Done |
-| 18 | Chat index slows to every 30 s while a recently written log is over 50 MB; account file parsed only when it changes; saves queued | Done |
+| 18 | Chat index reads only what a log gained (was: slowed to every 30 s for logs over 50 MB); account file parsed only when it changes; saves queued | Done |
 | 19 | README (with screenshots in `media/`) reduced to what the extension adds; `CONTRIBUTING.md` and `CHANGELOG.md` added (Marketplace shows README and CHANGELOG from the package) | Done |
 | 20 | Migration to TypeScript; live meters read as off when the hook is not in `statusLine`; hardened delete and setup races | Done |
 | - | Pricing and cost estimates | Dropped (see spec, "Rejected ideas") |

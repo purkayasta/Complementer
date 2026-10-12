@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.1
+
+- Chat list updates read only what a log gained since the last update (the findings and read position are kept per log), instead of re-reading the whole file. The 30 s slow-down for logs over 50 MB is gone, since an update no longer costs the size of the file.
+- Reading a chat as a transcript turns each log line into markdown as it is read, so a big log is never held in memory.
+- The project dropdown keeps its options (and an open list stays open) when a new message arrives, and is rebuilt only when the projects change.
+- Smaller package: the screenshots and the icon are compressed (about 417 KB down to 160 KB, the icon alone from 28 KB to 6 KB).
+- Internal clean-up: shared queue, timer and context-token helpers, shared panel CSS rules, no unused exports.
+
 ## 1.2.0
 
 - Each chat row shows its session cost when Claude Code has reported one for it (the same figure as the Usage section, no estimate). The highest cost reported per session is saved in `session-costs.json` (cost only, no chat content; removed when the chat is deleted), so a row keeps it after the live file is gone. Chats that never reported live show none.

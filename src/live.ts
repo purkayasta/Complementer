@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Account, Limit, LiveState, WindowState } from './types';
 import { STALE_AFTER_MS, KEEP_FILES_FOR_MS, WATCH_DEBOUNCE_MS } from './consts';
-import { tryParseJson, toFiniteNumber, capitalize } from './utils';
+import { tryParseJson, tryReadText, toFiniteNumber, sumContextTokens, capitalize } from './utils';
 
 const fsPromises = fs.promises;
 
@@ -23,9 +23,6 @@ export function parsePayload(text: string, updatedAt: number): LiveState | null 
   if (!payload || typeof payload.session_id !== 'string') return null;
   const contextWindow = payload.context_window ?? {};
   const currentUsage = contextWindow.current_usage;
-  const contextTokens = currentUsage
-    ? (toFiniteNumber(currentUsage.input_tokens) ?? 0) + (toFiniteNumber(currentUsage.cache_creation_input_tokens) ?? 0) + (toFiniteNumber(currentUsage.cache_read_input_tokens) ?? 0)
-    : undefined;
   return {
     sessionId: payload.session_id,
     workingDirectory: typeof payload.cwd === 'string' ? payload.cwd : '',
@@ -33,7 +30,7 @@ export function parsePayload(text: string, updatedAt: number): LiveState | null 
     modelId: typeof payload.model?.id === 'string' ? payload.model.id : undefined,
     contextPercent: toFiniteNumber(contextWindow.used_percentage),
     contextWindowSize: toFiniteNumber(contextWindow.context_window_size),
-    contextTokens,
+    contextTokens: currentUsage ? sumContextTokens(currentUsage) : undefined,
     fiveHourLimit: parseLimit(payload.rate_limits?.five_hour),
     weeklyLimit: parseLimit(payload.rate_limits?.seven_day),
     costUsd: toFiniteNumber(payload.cost?.total_cost_usd),
@@ -49,6 +46,9 @@ export function isWithin(childPath: string, folderPath: string, ignoreCase = pro
   return child === folder || child.startsWith(folder + '/');
 }
 
+/** Whether a path is one of the workspace folders or inside one. */
+export const isInWorkspace = (childPath: string, workspaceFolders: string[]) => workspaceFolders.some((folder) => isWithin(childPath, folder));
+
 /** Reducer: keep whichever of two live states was written last. */
 function newerSession(newest: LiveState | undefined, candidate: LiveState): LiveState {
   return !newest || candidate.updatedAt > newest.updatedAt ? candidate : newest;
@@ -58,7 +58,7 @@ function newerSession(newest: LiveState | undefined, candidate: LiveState): Live
 export function pickSessions(states: Iterable<LiveState>, workspaceFolders: string[], ignoredSessionIds: ReadonlySet<string> = new Set()): { contextSession: LiveState | undefined; limitsSession: LiveState | undefined } {
   const allStates = [...states];
   return {
-    contextSession: allStates.filter((state) => !ignoredSessionIds.has(state.sessionId)).filter((state) => workspaceFolders.some((folder) => isWithin(state.workingDirectory, folder))).reduce(newerSession, undefined),
+    contextSession: allStates.filter((state) => !ignoredSessionIds.has(state.sessionId)).filter((state) => isInWorkspace(state.workingDirectory, workspaceFolders)).reduce(newerSession, undefined),
     limitsSession: allStates.filter((state) => state.fiveHourLimit || state.weeklyLimit).reduce(newerSession, undefined),
   };
 }
@@ -161,13 +161,7 @@ export function parseAccount(claudeConfig: any): Account | undefined {
   return { email: account.emailAddress, plan, organization: typeof account.organizationName === 'string' ? account.organizationName : undefined };
 }
 
-export async function readAccount(claudeConfigPath: string): Promise<Account | undefined> {
-  try {
-    return parseAccount(JSON.parse(await fsPromises.readFile(claudeConfigPath, 'utf8')));
-  } catch {
-    return undefined;
-  }
-}
+const readAccount = async (claudeConfigPath: string) => parseAccount(tryParseJson((await tryReadText(claudeConfigPath)) ?? ''));
 
 /**
  * ~/.claude.json holds all of Claude Code's config and can be large, so it is only parsed when its modification time changed.

@@ -109,21 +109,10 @@ function createViewState(savedState: Partial<ViewState> | undefined): ViewState 
 
 const viewState = createViewState(vscode.getState() as Partial<ViewState> | undefined);
 
-function getElement(id: string): HTMLElement {
+/** The element with this id, which must be of the given class (any element by default). */
+function getElement<T extends HTMLElement = HTMLElement>(id: string, type: new () => T = HTMLElement as new () => T): T {
   const element = document.getElementById(id);
-  if (!element) throw new Error(`#${id} is missing from panel.html`);
-  return element;
-}
-
-function getSelect(id: string) {
-  const element = getElement(id);
-  if (!(element instanceof HTMLSelectElement)) throw new Error(`#${id} is not a <select>`);
-  return element;
-}
-
-function getInput(id: string) {
-  const element = getElement(id);
-  if (!(element instanceof HTMLInputElement)) throw new Error(`#${id} is not an <input>`);
+  if (!(element instanceof type)) throw new Error(`#${id} is missing from panel.html or is not a ${type.name}`);
   return element;
 }
 
@@ -141,9 +130,9 @@ const elements = {
   usageNote: getElement('usage-note'),
   refreshUsage: getElement('refresh-usage'),
   newChat: getElement('new-chat'),
-  projectFilter: getSelect('project-filter'),
+  projectFilter: getElement('project-filter', HTMLSelectElement),
   activeFilter: getElement('active-filter'),
-  search: getInput('search'),
+  search: getElement('search', HTMLInputElement),
   chatList: getElement('chat-list'),
   chatEmpty: getElement('chat-empty'),
   rangeSwitch: getElement('range-switch'),
@@ -293,7 +282,6 @@ function renderBreakdownRows(breakdown: Breakdown) {
   ];
 }
 
-/** Short label for a tool target: a file's name, or a command without its leading `cd <dir> &&`. The full text stays in the tooltip. */
 /** The bar, then a "Details" toggle (closed by default) that opens the parts and the skills used. */
 function renderContextDetails(usage: PanelState['usage']) {
   const { breakdown, skills = [] } = usage;
@@ -322,16 +310,11 @@ function renderContextDetails(usage: PanelState['usage']) {
 
 // ---- chat list ----
 
-/** @param type 'open', 'read', 'delete' or 'deletePermanently' */
-function postChatMessage(type: string, chatId: string) {
-  vscode.postMessage({ type, id: chatId });
-}
-
-/** Click handler for a row's action buttons; the click must not also open the chat. */
+/** Click handler for a row's action buttons; the click must not also open the chat. @param type 'read', 'delete' or 'deletePermanently' */
 function createActionHandler(type: string, chatId: string): (event: MouseEvent) => void {
   return (event) => {
     event.stopPropagation();
-    postChatMessage(type, chatId);
+    vscode.postMessage({ type, id: chatId });
   };
 }
 
@@ -339,7 +322,7 @@ function renderChatRow(chat: PanelChat, activeChatId: string | undefined) {
   const percentColor = chat.context ? warningColor(chat.context.percent) : '';
   return buildElement(
     'li',
-    { className: 'chat-row' + (chat.id === activeChatId ? ' is-selected' : ''), title: `${chat.title}\n${new Date(chat.modifiedAtMs).toLocaleString()}`, onClick: () => postChatMessage('open', chat.id) },
+    { className: 'chat-row' + (chat.id === activeChatId ? ' is-selected' : ''), title: `${chat.title}\n${new Date(chat.modifiedAtMs).toLocaleString()}`, onClick: () => vscode.postMessage({ type: 'open', id: chat.id }) },
     buildElement('span', { className: 'chat-dot' + (isActive(chat.modifiedAtMs) ? ' is-active' : '') }),
     buildElement('div', { className: 'chat-text' }, buildElement('b', { className: 'chat-title' }, chat.title), buildElement('span', { className: 'chat-project' }, chat.projectName), chat.skills ? buildElement('span', { className: 'chat-skills', title: 'Skills used in this chat' }, chat.skills.map(([name, count]) => `${name} ×${count}`).join(' · ')) : null),
     buildElement('span', { className: 'chat-percent' + (percentColor ? ' is-warning' : ''), style: percentColor ? { color: percentColor } : {}, title: chat.context ? 'Context use' : '' }, chat.context ? Math.round(chat.context.percent) + '%' : ''),
@@ -408,11 +391,18 @@ function renderChatGroups(chats: PanelChat[], state: PanelState | undefined) {
     });
 }
 
+/** The project list the dropdown was last built from. */
+const projectOptions = { key: '' };
+
 function renderChatList() {
   const state = viewState.panelState;
   const chats = state?.chats ?? [];
   const projects = [...new Map(chats.filter((chat) => chat.projectPath).map((chat) => [chat.projectPath, projectLabel(chat, chats)])).entries()].sort((first, second) => first[1].localeCompare(second[1]));
-  elements.projectFilter.replaceChildren(buildElement('option', { value: '' }, 'All projects'), ...projects.map(([projectPath, label]) => buildElement('option', { value: projectPath }, label)));
+  const projectsKey = JSON.stringify(projects);
+  if (projectsKey !== projectOptions.key) {
+    projectOptions.key = projectsKey; // replacing the options closes a dropdown the user has open, so only do it when the list changed
+    elements.projectFilter.replaceChildren(buildElement('option', { value: '' }, 'All projects'), ...projects.map(([projectPath, label]) => buildElement('option', { value: projectPath }, label)));
+  }
   viewState.projectFilter = projects.some(([projectPath]) => projectPath === viewState.projectFilter) ? viewState.projectFilter : '';
   elements.projectFilter.value = viewState.projectFilter;
   elements.activeFilter.textContent = '⚡ Active · ' + chats.filter((chat) => isActive(chat.modifiedAtMs)).length;

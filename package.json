@@ -2,7 +2,7 @@
   "name": "complementer",
   "displayName": "Complementer",
   "description": "Context and plan-limit meters, a session manager and usage insights for Claude Code in VS Code. Independent project, not affiliated with Anthropic.",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "publisher": "pritompurkayasta",
   "author": {
     "name": "purkayasta",

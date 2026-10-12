@@ -5,7 +5,6 @@ import path from 'node:path';
 import vm from 'node:vm';
 import type { Chat, LiveState } from '../src/types';
 import * as viewModel from '../src/view-model';
-import { LARGE_LOG_BYTES } from '../src/consts';
 import { createSessionTally } from '../src/breakdown';
 
 const NOW_MS = Date.parse('2026-10-11T12:00:00');
@@ -108,12 +107,6 @@ test('computeInsights: an empty today does not break the streak', () => {
   const historyDays = { '2026-10-10': { '/w': { m: bucket } }, '2026-10-09': { '/w': { m: bucket } } };
   assert.strictEqual(viewModel.computeInsights(historyDays, new Date('2026-10-11T12:00:00')).streakDays, 2);
   assert.strictEqual(viewModel.computeInsights({}, new Date('2026-10-11T12:00:00')).busiestDay, undefined);
-});
-
-test('chatIndexDelayMs: normal logs refresh every 5 s, a log over 50 MB every 30 s', () => {
-  assert.strictEqual(viewModel.chatIndexDelayMs(0), 5000);
-  assert.strictEqual(viewModel.chatIndexDelayMs(LARGE_LOG_BYTES), 5000);
-  assert.strictEqual(viewModel.chatIndexDelayMs(LARGE_LOG_BYTES + 1), 30000);
 });
 
 test('buildPanelState: a chat row shows its live cost, else its saved cost', () => {

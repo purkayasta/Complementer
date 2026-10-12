@@ -31,17 +31,25 @@ test('chat index finds titles, working directory, context tokens and model, and 
   assert.strictEqual(chatIndex.chats.length, 1); // deleted logs drop out
 });
 
-test('largestRecentLogBytes ignores big logs that are not being written', async () => {
+test('chat index reads only what a log gained, keeps what it learned earlier, and starts over on a shorter log', async () => {
   const projectsRoot = await createTemporaryDirectory();
-  await writeTextFile(path.join(projectsRoot, 'proj', 'old.jsonl'), buildUserLine('x'.repeat(5000)) + '\n');
-  await writeTextFile(path.join(projectsRoot, 'proj', 'new.jsonl'), buildUserLine('y') + '\n');
-  const oldTime = new Date(Date.now() - 3600 * 1000);
-  await fsPromises.utimes(path.join(projectsRoot, 'proj', 'old.jsonl'), oldTime, oldTime);
+  const logPath = path.join(projectsRoot, 'proj', 'c1.jsonl');
+  await writeTextFile(logPath, [buildUserLine('Fix the login bug please'), buildAssistantLine('m1')].join('\n') + '\n');
   const chatIndex = new ChatIndex(projectsRoot);
   await chatIndex.update();
-  const newSize = (await fsPromises.stat(path.join(projectsRoot, 'proj', 'new.jsonl'))).size;
-  assert.strictEqual(chatIndex.largestRecentLogBytes(Date.now(), 5 * 60 * 1000), newSize); // the 5 KB log is an hour old
-  assert.strictEqual(chatIndex.largestRecentLogBytes(Date.now() + 2 * 3600 * 1000, 5 * 60 * 1000), 0); // nothing recent
+  const firstSize = (await fsPromises.stat(logPath)).size;
+  assert.strictEqual(chatIndex.indexedLogs.get(logPath)?.cursor.offset, firstSize);
+  assert.strictEqual(chatIndex.chats[0].title, 'Fix the login bug please');
+
+  await fsPromises.appendFile(logPath, [JSON.stringify({ type: 'ai-title', aiTitle: 'Login bug' }), buildUserLine('A later prompt'), buildAssistantLine('m2')].join('\n') + '\n');
+  await chatIndex.update();
+  assert.strictEqual(chatIndex.chats[0].title, 'Login bug'); // the title that arrived later wins
+  assert.strictEqual(chatIndex.chats[0].workingDirectory, '/p/a'); // learned from the first read, not read again
+  assert.strictEqual(chatIndex.indexedLogs.get(logPath)?.cursor.offset, (await fsPromises.stat(logPath)).size);
+
+  await writeTextFile(logPath, buildUserLine('Brand new content') + '\n'); // shorter: replaced
+  await chatIndex.update();
+  assert.strictEqual(chatIndex.chats[0].title, 'Brand new content');
 });
 
 test('getSessionPaths lists every per-session artifact and refuses anything outside the projects dir', () => {

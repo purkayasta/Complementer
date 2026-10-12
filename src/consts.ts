@@ -3,6 +3,8 @@
 import path from 'node:path';
 import type { ContentKind, TokenTotals } from './types';
 
+export const DAY_MS = 24 * 3600 * 1000;
+
 // ---- Session logs ----
 
 export const USAGE_NEEDLE = Buffer.from('"output_tokens"');
@@ -38,7 +40,7 @@ export const MAX_WORKING_DIRECTORY_BYTES = 600;
 // ---- Live feed ----
 
 export const STALE_AFTER_MS = 10 * 60 * 1000;
-export const KEEP_FILES_FOR_MS = 7 * 24 * 3600 * 1000;
+export const KEEP_FILES_FOR_MS = 7 * DAY_MS;
 export const WATCH_DEBOUNCE_MS = 100;
 export const USAGE_QUERY_MIN_GAP_MS = 60 * 1000; // chatting also refreshes the limits, but never more often than this
 export const USAGE_QUERY_FILE = 'usage-query.json'; // in live/, so every window sees the answer one window asked for
@@ -63,9 +65,7 @@ export const INSTALLED_HOOK_PATH = /complementer[\\/]hook\.(sh|js)$/;
 
 // ---- View model ----
 
-export const CHAT_INDEX_THROTTLE_MS = 5000; // re-indexing a changed log reads all of it, and the active chat's log grows constantly
-export const LARGE_LOG_BYTES = 50 * 1024 * 1024;
-export const LARGE_LOG_THROTTLE_MS = 30 * 1000; // re-indexing costs about 1 ms per MB, so a huge growing log is indexed less often
+export const CHAT_INDEX_THROTTLE_MS = 5000; // the active chat's log grows constantly; indexing reads only what it gained
 export const INSIGHT_DAYS = 60; // also how long daily totals are kept: older days are dropped when the files are saved
 export const INSIGHT_RANGES = [1, 7, 30];
 export const TOP_PROJECTS_PER_DAY = 3;
@@ -85,4 +85,4 @@ export const CLOCK_TICK_MS = 30 * 1000; // reset countdowns and staleness move w
 export const ACTIVE_SESSION_MS = 5 * 60 * 1000;
 export const BACKUP_SUFFIX = '.bak'; // last good copy of a state file, made each time one loads
 export const UNREADABLE_SUFFIX = '.bad';
-export const IDLE_LOG_MS = 7 * 24 * 3600 * 1000; // a log untouched this long can no longer get more blocks of its last reply
+export const IDLE_LOG_MS = 7 * DAY_MS; // a log untouched this long can no longer get more blocks of its last reply

@@ -42,7 +42,7 @@ export interface Bucket extends TokenTotals {
 export type HistoryDays = Record<string, Record<string, Record<string, Bucket>>>;
 
 /** The most recent response counted for a log file, used to merge repeated content blocks. */
-export interface LastResponse extends TokenTotals {
+interface LastResponse extends TokenTotals {
   messageId: string;
   day: string;
   workingDirectory: string;
@@ -62,7 +62,7 @@ export interface FileState {
 export type ContentKind = 'toolResults' | 'toolCalls' | 'assistantText' | 'assistantThinking' | 'userText' | 'attachments';
 
 /** A tool call whose result has not been read yet. */
-export interface PendingToolUse {
+interface PendingToolUse {
   tool: string;
 }
 
@@ -86,7 +86,7 @@ export interface SessionTally {
   skillCounts: Record<string, number>;
 }
 
-export interface BreakdownPart {
+interface BreakdownPart {
   kind: ContentKind;
   /** Estimated tokens. */
   tokens: number;
@@ -271,7 +271,7 @@ export interface PanelChat {
   skills?: NamedAmount[];
 }
 
-export interface PanelUsage {
+interface PanelUsage {
   context?: MeterView;
   fiveHour?: MeterView;
   weekly?: MeterView;

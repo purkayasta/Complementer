@@ -1,11 +1,10 @@
 // Skill calls found in the session logs, counted per day. Kept in a file of its own (skills.json, with its own read
 // offsets) so the token history is never touched. Names and counts only: no chat content.
 import { promises as fsPromises } from 'node:fs';
-import path from 'node:path';
 import type { SkillDays, SkillSessions, SkillFileState } from './types';
 import { SKILL_CALL_NEEDLE, SKILLS_VERSION, NAME_PATTERN } from './consts';
-import { dropOldDays, getOwnSessionId, iterateLineBatches, toDayKey } from './logs';
-import { tryParseJson, loadWithBackup, incrementCount, writeAtomic } from './utils';
+import { saveState, getOwnSessionId, iterateLineBatches, readNewLines, toDayKey } from './logs';
+import { tryParseJson, loadWithBackup, incrementCount, createQueue } from './utils';
 
 /**
  * Callers pre-filter on the raw bytes (SKILL_CALL_NEEDLE), so a line that merely mentions the words is rejected here by shape.
@@ -22,6 +21,14 @@ export function parseSkillUses(line: string): { day: string; sessionId: string; 
   return day && skills.length ? { day, sessionId: typeof entry.sessionId === 'string' ? entry.sessionId : '', skills } : null;
 }
 
+/** The skill uses of a line, unless it belongs to another session: a resumed or forked chat carries other sessions' replies, counted in their own log. */
+function parseOwnSkillUses(text: string, ownSessionId: string) {
+  const uses = parseSkillUses(text);
+  return uses && (!uses.sessionId || uses.sessionId === ownSessionId) ? uses : null;
+}
+
+const hasSkillCall = (line: Buffer) => line.includes(SKILL_CALL_NEEDLE);
+
 export class SkillHistory {
   days: SkillDays = {};
 
@@ -31,9 +38,9 @@ export class SkillHistory {
 
   hasUnsavedChanges = false;
 
-  pendingScans: Promise<unknown> = Promise.resolve();
+  readonly #enqueueScan = createQueue();
 
-  pendingSaves: Promise<unknown> = Promise.resolve();
+  readonly #enqueueSave = createQueue();
 
   constructor(private readonly filePath: string) {}
 
@@ -66,9 +73,7 @@ export class SkillHistory {
    * @returns true if any file had new data
    */
   scan(filePaths: string[]): Promise<boolean> {
-    const scanResult = this.pendingScans.then(() => this.#scanFiles(filePaths));
-    this.pendingScans = scanResult.catch(() => {});
-    return scanResult;
+    return this.#enqueueScan(() => this.#scanFiles(filePaths));
   }
 
   async #scanFiles(filePaths: string[]): Promise<boolean> {
@@ -81,20 +86,11 @@ export class SkillHistory {
     const fileState = (this.fileStates[filePath] ||= { offset: 0 });
     const ownSessionId = getOwnSessionId(filePath);
     try {
-      const { size: fileSize } = await fsPromises.stat(filePath);
-      if (fileState.needsSessionBackfill) await this.#backfillSessions(filePath, fileState, ownSessionId, fileSize);
-      const offsetBefore = fileState.offset;
-      if (fileSize < fileState.offset) fileState.offset = 0; // truncated or replaced: start over
-      if (fileSize === fileState.offset) return false;
-      for await (const lines of iterateLineBatches(filePath, fileState)) {
-        for (const line of lines) {
-          if (!line.includes(SKILL_CALL_NEEDLE)) continue;
-          const uses = parseSkillUses(line.toString('utf8'));
-          // A resumed or forked chat carries another session's replies; they are counted in their own log.
-          if (uses && (!uses.sessionId || uses.sessionId === ownSessionId)) this.#addUses(uses.day, uses.skills, ownSessionId);
-        }
-      }
-      const hadNewData = fileState.offset !== offsetBefore;
+      if (fileState.needsSessionBackfill) await this.#backfillSessions(filePath, fileState, ownSessionId);
+      const hadNewData = await readNewLines(filePath, fileState, hasSkillCall, (text) => {
+        const uses = parseOwnSkillUses(text, ownSessionId);
+        if (uses) this.#addUses(uses.day, uses.skills, ownSessionId);
+      });
       if (hadNewData) this.hasUnsavedChanges = true; // offsets are saved too, or the next start would count the same calls again
       return hadNewData;
     } catch {
@@ -103,9 +99,10 @@ export class SkillHistory {
   }
 
   /** Version 1 migration: count the already-read bytes (before fileState.offset) into the sessions only. */
-  async #backfillSessions(filePath: string, fileState: SkillFileState, ownSessionId: string, fileSize: number) {
+  async #backfillSessions(filePath: string, fileState: SkillFileState, ownSessionId: string) {
     delete fileState.needsSessionBackfill;
     this.hasUnsavedChanges = true;
+    const { size: fileSize } = await fsPromises.stat(filePath);
     if (fileSize < fileState.offset) return; // replaced since: the normal scan starts it over
     const cursor = { offset: 0 };
     for await (const lines of iterateLineBatches(filePath, cursor)) {
@@ -113,9 +110,8 @@ export class SkillHistory {
       for (const line of lines) {
         lineEnd += line.length + 1;
         if (lineEnd > fileState.offset) return; // from here on the day counts have not read it either
-        if (!line.includes(SKILL_CALL_NEEDLE)) continue;
-        const uses = parseSkillUses(line.toString('utf8'));
-        if (uses && (!uses.sessionId || uses.sessionId === ownSessionId)) this.#addUses(uses.day, uses.skills, ownSessionId, false);
+        const uses = hasSkillCall(line) ? parseOwnSkillUses(line.toString('utf8'), ownSessionId) : null;
+        if (uses) this.#addUses(uses.day, uses.skills, ownSessionId, false);
       }
     }
   }
@@ -130,21 +126,6 @@ export class SkillHistory {
 
   /** Saves run one after another: two writers on the same temporary file could leave a half-written file. */
   save() {
-    const result = this.pendingSaves.then(() => this.#saveNow());
-    this.pendingSaves = result.catch(() => {});
-    return result;
-  }
-
-  async #saveNow() {
-    if (dropOldDays(this.days, new Date())) this.hasUnsavedChanges = true;
-    if (!this.hasUnsavedChanges) return;
-    this.hasUnsavedChanges = false;
-    try {
-      await fsPromises.mkdir(path.dirname(this.filePath), { recursive: true });
-      await writeAtomic(this.filePath, JSON.stringify({ version: SKILLS_VERSION, days: this.days, sessions: this.sessions, fileStates: this.fileStates }));
-    } catch (error) {
-      this.hasUnsavedChanges = true; // retry on the next flush
-      throw error;
-    }
+    return this.#enqueueSave(() => saveState(this, this.filePath, this.days, () => ({ version: SKILLS_VERSION, days: this.days, sessions: this.sessions, fileStates: this.fileStates })));
   }
 }

@@ -3,8 +3,8 @@
 import { promises as fsPromises, type Dirent } from 'node:fs';
 import path from 'node:path';
 import type { Bucket, FileState, HistoryDays, TokenTotals, UsageRecord } from './types';
-import { USAGE_NEEDLE, TOKEN_KEYS, HISTORY_VERSION, INSIGHT_DAYS, IDLE_LOG_MS, READ_CHUNK_BYTES, NEWLINE_BYTE } from './consts';
-import { tryParseJson, loadWithBackup, toNonNegativeNumber, padTwoDigits, mapValues, writeAtomic } from './utils';
+import { USAGE_NEEDLE, TOKEN_KEYS, HISTORY_VERSION, INSIGHT_DAYS, DAY_MS, IDLE_LOG_MS, READ_CHUNK_BYTES, NEWLINE_BYTE } from './consts';
+import { tryParseJson, loadWithBackup, toNonNegativeNumber, padTwoDigits, mapValues, writeAtomic, createQueue } from './utils';
 
 /**
  * Local-time day (YYYY-MM-DD), so "today" matches what the user sees on their clock.
@@ -21,7 +21,7 @@ export function toDayKey(isoTimestamp: string): string | null {
  * @returns true if anything was removed
  */
 export function dropOldDays(daysByKey: Record<string, unknown>, now: Date): boolean {
-  const cutoff = toDayKey(new Date(now.getTime() - INSIGHT_DAYS * 24 * 3600 * 1000).toISOString()) ?? '';
+  const cutoff = toDayKey(new Date(now.getTime() - INSIGHT_DAYS * DAY_MS).toISOString()) ?? '';
   const oldKeys = Object.keys(daysByKey).filter((key) => key < cutoff);
   oldKeys.forEach((key) => delete daysByKey[key]);
   return oldKeys.length > 0;
@@ -85,29 +85,39 @@ export async function* iterateLineBatches(filePath: string, cursor: { offset: nu
   }
 }
 
-/** Read the usage records appended to a log since the last call. */
-export async function readNewRecords(filePath: string, fileState: FileState, onRecord: (record: UsageRecord) => void) {
-  const { size: fileSize } = await fsPromises.stat(filePath); // unchanged files are never opened
-  if (fileSize < fileState.offset) {
-    fileState.offset = 0; // truncated or replaced: start over
-    fileState.lastResponse = null;
+/**
+ * Pass `onLine` the text of each complete line appended since the cursor, if `isWanted` accepts its raw bytes first.
+ * A file that shrank (truncated or replaced) is read from the start again after `onReset`. Unchanged files are never opened.
+ * @returns true if the cursor moved
+ */
+export async function readNewLines(filePath: string, cursor: { offset: number }, isWanted: (line: Buffer) => boolean, onLine: (text: string) => void, onReset: () => void = () => {}): Promise<boolean> {
+  const { size: fileSize } = await fsPromises.stat(filePath);
+  const offsetBefore = cursor.offset;
+  if (fileSize < offsetBefore) {
+    cursor.offset = 0;
+    onReset();
   }
-  if (fileSize === fileState.offset) return;
-  for await (const lines of iterateLineBatches(filePath, fileState)) {
-    for (const line of lines) {
-      if (!line.includes(USAGE_NEEDLE)) continue;
-      const record = parseUsageLine(line.toString('utf8'));
-      if (record) onRecord(record);
-    }
+  if (fileSize === cursor.offset) return false;
+  for await (const lines of iterateLineBatches(filePath, cursor)) {
+    for (const line of lines) if (isWanted(line)) onLine(line.toString('utf8'));
   }
+  return cursor.offset !== offsetBefore;
 }
 
-/** All complete lines of a file that pass a cheap check on the raw bytes. */
-export async function readLines(filePath: string, shouldKeep: (line: Buffer) => boolean): Promise<Buffer[]> {
-  const keptLines: Buffer[] = [];
-  for await (const lines of iterateLineBatches(filePath, { offset: 0 })) keptLines.push(...lines.filter(shouldKeep));
-  return keptLines;
-}
+/** Read the usage records appended to a log since the last call. */
+export const readNewRecords = (filePath: string, fileState: FileState, onRecord: (record: UsageRecord) => void): Promise<boolean> =>
+  readNewLines(
+    filePath,
+    fileState,
+    (line) => line.includes(USAGE_NEEDLE),
+    (text) => {
+      const record = parseUsageLine(text);
+      if (record) onRecord(record);
+    },
+    () => {
+      fileState.lastResponse = null;
+    },
+  );
 
 /** Convert the version 1 storage layout (terse keys) to the current one. */
 function migrateHistoryV1(saved: any) {
@@ -124,6 +134,23 @@ function renameTotalsV1(oldTotals: any): TokenTotals {
   return { inputTokens: oldTotals.in, cacheCreationTokens: oldTotals.cc, cacheReadTokens: oldTotals.cr, outputTokens: oldTotals.out };
 }
 
+/**
+ * Write a saved-state file if it has unsaved changes (after dropping days nothing shows any more). If the write fails the
+ * changes stay pending, so the next flush retries.
+ */
+export async function saveState(state: { hasUnsavedChanges: boolean }, filePath: string, daysByKey: Record<string, unknown>, snapshot: () => unknown) {
+  if (dropOldDays(daysByKey, new Date())) state.hasUnsavedChanges = true;
+  if (!state.hasUnsavedChanges) return;
+  state.hasUnsavedChanges = false;
+  try {
+    await fsPromises.mkdir(path.dirname(filePath), { recursive: true });
+    await writeAtomic(filePath, JSON.stringify(snapshot()));
+  } catch (error) {
+    state.hasUnsavedChanges = true;
+    throw error;
+  }
+}
+
 export class History {
   days: HistoryDays = {};
 
@@ -131,7 +158,7 @@ export class History {
 
   hasUnsavedChanges = false;
 
-  pendingSaves: Promise<unknown> = Promise.resolve();
+  readonly #enqueueSave = createQueue();
 
   constructor(private readonly filePath: string) {}
 
@@ -201,9 +228,7 @@ export class History {
 
   /** Saves run one after another: two writers on the same temporary file could leave a half-written history. */
   save() {
-    const result = this.pendingSaves.then(() => this.#saveNow());
-    this.pendingSaves = result.catch(() => {});
-    return result;
+    return this.#enqueueSave(() => saveState(this, this.filePath, this.days, () => ({ version: HISTORY_VERSION, days: this.days, fileStates: this.fileStates })));
   }
 
   /**
@@ -224,19 +249,6 @@ export class History {
           this.hasUnsavedChanges = true;
         }),
     );
-  }
-
-  async #saveNow() {
-    if (dropOldDays(this.days, new Date())) this.hasUnsavedChanges = true;
-    if (!this.hasUnsavedChanges) return;
-    this.hasUnsavedChanges = false;
-    try {
-      await fsPromises.mkdir(path.dirname(this.filePath), { recursive: true });
-      await writeAtomic(this.filePath, JSON.stringify({ version: HISTORY_VERSION, days: this.days, fileStates: this.fileStates }));
-    } catch (error) {
-      this.hasUnsavedChanges = true; // retry on the next flush
-      throw error;
-    }
   }
 }
 
@@ -272,7 +284,7 @@ export function getOwnSessionId(filePath: string): string {
 }
 
 export class Scanner {
-  pendingScans: Promise<unknown> = Promise.resolve();
+  readonly #enqueueScan = createQueue();
 
   constructor(
     private readonly projectsRoot: string,
@@ -284,9 +296,7 @@ export class Scanner {
    * @returns true if any file had new data
    */
   scan(filePaths?: string[]): Promise<boolean> {
-    const scanResult = this.pendingScans.then(() => this.#scanFiles(filePaths));
-    this.pendingScans = scanResult.catch(() => {});
-    return scanResult;
+    return this.#enqueueScan(() => this.#scanFiles(filePaths));
   }
 
   async #scanFiles(filePaths?: string[]) {
@@ -294,16 +304,12 @@ export class Scanner {
     const hadNewData: boolean[] = [];
     for (const filePath of filesToScan) {
       const fileState = (this.history.fileStates[filePath] ||= { offset: 0, lastResponse: null });
-      const offsetBefore = fileState.offset;
       const ownSessionId = getOwnSessionId(filePath);
       // A resumed or forked chat can carry another session's replies (same message ids); they are counted in their own log.
-      const wasRead = await readNewRecords(filePath, fileState, (record) => {
+      const hadNewRecords = await readNewRecords(filePath, fileState, (record) => {
         if (!record.sessionId || record.sessionId === ownSessionId) this.history.addRecord(record, fileState);
-      }).then(
-        () => true,
-        () => false, // file vanished between listing and reading
-      );
-      hadNewData.push(wasRead && fileState.offset !== offsetBefore);
+      }).catch(() => false); // file vanished between listing and reading
+      hadNewData.push(hadNewRecords);
     }
     return hadNewData.some(Boolean);
   }

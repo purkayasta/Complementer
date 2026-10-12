@@ -140,15 +140,34 @@ ul {
   font-weight: 600;
 }
 
+/* Tracks: a clipped bar with a fill, or a stack of segments, inside */
+.meter-track,
+.bar-row-track,
+.model-stack,
+.breakdown-stack {
+  overflow: hidden;
+}
+
+.meter-fill,
+.bar-row-fill,
+.model-stack-segment,
+.breakdown-segment {
+  height: 100%;
+}
+
+.model-stack,
+.breakdown-stack {
+  display: flex;
+  border-radius: 4px;
+}
+
 .meter-track {
   height: 6px;
   border-radius: 3px;
   background: color-mix(in srgb, var(--vscode-foreground) 18%, transparent);
-  overflow: hidden;
 }
 
 .meter-fill {
-  height: 100%;
   background: var(--bar-color);
   transition: width 0.3s;
 }
@@ -313,15 +332,14 @@ ul {
   white-space: nowrap;
 }
 
-.chat-project {
+.chat-project,
+.chat-skills {
   font-size: 11px;
   opacity: 0.6;
 }
 
 .chat-skills {
   display: block;
-  font-size: 11px;
-  opacity: 0.6;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -376,17 +394,6 @@ ul {
 }
 
 /* Insights */
-.insights-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 10px;
-}
-
-.insights-header .section-title {
-  margin: 0;
-}
-
 .segmented {
   display: flex;
   border: 1px solid var(--border);
@@ -491,25 +498,16 @@ ul {
   height: 5px;
   border-radius: 3px;
   background: color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
-  overflow: hidden;
   margin-top: 3px;
 }
 
 .bar-row-fill {
-  height: 100%;
   background: linear-gradient(90deg, var(--accent-start), var(--accent-end));
 }
 
 .model-stack {
-  display: flex;
   height: 8px;
-  border-radius: 4px;
-  overflow: hidden;
   margin: 6px 0 8px;
-}
-
-.model-stack-segment {
-  height: 100%;
 }
 
 .legend-row {
@@ -544,15 +542,8 @@ ul {
 
 /* Context breakdown */
 .breakdown-stack {
-  display: flex;
   height: 10px;
-  border-radius: 4px;
-  overflow: hidden;
   margin-top: 8px;
-}
-
-.breakdown-segment {
-  height: 100%;
 }
 
 .breakdown-legend {

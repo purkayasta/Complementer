@@ -1,17 +1,11 @@
 // Pure functions (no VS Code, no I/O) that turn logs, live payloads and history into what the status bar and the
 // Sessions panel show. Everything the user sees is decided here, so it can be unit-tested.
 import path from 'node:path';
-import { pickSessions, isWithin, effectiveLimit, isStale } from './live';
+import { pickSessions, isInWorkspace, effectiveLimit, isStale } from './live';
 import { toDayKey } from './logs';
 import { incrementCount } from './utils';
 import type { Account, Bucket, Breakdown, SessionTally, SkillDays, SkillSessions, Chat, HistoryDays, Insights, DayInsight, LiveState, MeterView, Meters, NamedAmount, PanelState, PanelTemplateValues, RangeInsight, TokenTotals, WindowState } from './types';
-import { UUID_PATTERN, CHAT_INDEX_THROTTLE_MS, LARGE_LOG_BYTES, LARGE_LOG_THROTTLE_MS, INSIGHT_DAYS, INSIGHT_RANGES, TOP_PROJECTS_PER_DAY, TOP_ENTRIES_PER_RANGE, TOP_TOOLS, TOP_SKILLS_PER_CHAT, TOP_SKILLS_PER_SESSION, CONTENT_KINDS } from './consts';
-
-/**
- * How long to wait before re-indexing chats.
- * @param largestRecentLogBytes The biggest log that changed recently.
- */
-export const chatIndexDelayMs = (largestRecentLogBytes: number): number => (largestRecentLogBytes > LARGE_LOG_BYTES ? LARGE_LOG_THROTTLE_MS : CHAT_INDEX_THROTTLE_MS);
+import { UUID_PATTERN, INSIGHT_DAYS, INSIGHT_RANGES, TOP_PROJECTS_PER_DAY, TOP_ENTRIES_PER_RANGE, TOP_TOOLS, TOP_SKILLS_PER_CHAT, TOP_SKILLS_PER_SESSION, CONTENT_KINDS } from './consts';
 
 export function formatTokens(tokens: number) {
   if (tokens >= 1e9) return (tokens / 1e9).toFixed(1) + 'B';
@@ -39,7 +33,7 @@ export function formatResetIn(resetsAtEpochSeconds: number | undefined, nowMs: n
  * Context use from a session's log tokens, or undefined until the model's window size is known (no guessing).
  * @param windowSizes Learned from live payloads: model id -> window size in tokens.
  */
-export function contextFromTokens(contextTokens: number | undefined, modelId: string | undefined, windowSizes: Record<string, number>): { percent: number; tokens: number; windowSize: number } | undefined {
+function contextFromTokens(contextTokens: number | undefined, modelId: string | undefined, windowSizes: Record<string, number>): { percent: number; tokens: number; windowSize: number } | undefined {
   const windowSize = modelId ? windowSizes[modelId] : undefined;
   return contextTokens !== undefined && windowSize ? { percent: (contextTokens / windowSize) * 100, tokens: contextTokens, windowSize } : undefined;
 }
@@ -78,7 +72,7 @@ export function computeMeters({ liveStates, chats, workspaceFolders, selectedSes
 
 /** The session to show when nothing is pinned: the newest chat in this workspace, else the one that last reported live. */
 function findAutomaticChat(chats: Chat[], liveSession: LiveState | undefined, workspaceFolders: string[]): Chat | undefined {
-  const newest = chats.filter((chat) => workspaceFolders.some((folder) => isWithin(chat.workingDirectory, folder))).reduce(newerChat, undefined);
+  const newest = chats.filter((chat) => isInWorkspace(chat.workingDirectory, workspaceFolders)).reduce(newerChat, undefined);
   return newest ?? chats.find((chat) => chat.id === liveSession?.sessionId);
 }
 
@@ -101,12 +95,6 @@ function topByName(namedAmounts: NamedAmount[], limit: number): NamedAmount[] {
   return Object.entries(namedAmounts.reduce(addToTotals, {}))
     .sort((first, second) => second[1] - first[1])
     .slice(0, limit);
-}
-
-/** A chat's top skills for its list row; undefined when it called none. */
-function topChatSkills(skillCounts: Record<string, number> | undefined): NamedAmount[] | undefined {
-  const top = topByName(Object.entries(skillCounts ?? {}), TOP_SKILLS_PER_CHAT);
-  return top.length ? top : undefined;
 }
 
 /** A session's skills, most used first. */
@@ -259,8 +247,9 @@ export function buildPanelState({ meters, account, liveStates, isLiveEnabled, ch
   const panelChats = chats
     .map((chat) => {
       const costUsd = liveBySessionId.get(chat.id)?.costUsd ?? sessionCosts[chat.id];
+      const skills = topByName(Object.entries(skillSessions[chat.id] ?? {}), TOP_SKILLS_PER_CHAT);
       const percent = liveBySessionId.get(chat.id)?.contextPercent ?? contextFromTokens(chat.contextTokens, chat.modelId, windowSizes)?.percent;
-      return { id: chat.id, title: chat.title, projectName: chat.workingDirectory ? projectName(chat.workingDirectory) : '', projectPath: chat.workingDirectory, isInWorkspace: workspaceFolders.some((folder) => isWithin(chat.workingDirectory, folder)), modifiedAtMs: chat.modifiedAtMs, context: percent === undefined ? undefined : { percent }, costLabel: costUsd === undefined ? undefined : formatUsd(costUsd), skills: topChatSkills(skillSessions[chat.id]) };
+      return { id: chat.id, title: chat.title, projectName: chat.workingDirectory ? projectName(chat.workingDirectory) : '', projectPath: chat.workingDirectory, isInWorkspace: isInWorkspace(chat.workingDirectory, workspaceFolders), modifiedAtMs: chat.modifiedAtMs, context: percent === undefined ? undefined : { percent }, costLabel: costUsd === undefined ? undefined : formatUsd(costUsd), skills: skills.length ? skills : undefined };
     })
     .sort((first, second) => second.modifiedAtMs - first.modifiedAtMs);
   const hasLiveFeed = isLiveEnabled ?? liveStates.length > 0;
