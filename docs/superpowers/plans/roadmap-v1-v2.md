@@ -14,13 +14,13 @@ Companion to `../specs/complementer-design.md`, which describes what is built. v
 | 4 | Live feed: `hook.sh` / `hook.js`, enable/disable with consent and exact restore | Done |
 | 5 | History + atomic store (`history.json`, tokens only), with a migration from the first layout | Done |
 | 6 | Status bar (warning above 50%, error from 80%) | Done |
-| 7 | Sessions panel: usage bars with reset countdowns, New session, searchable chat list with per-chat context % | Done |
+| 7 | Sessions panel: usage bars with reset countdowns, New Chat, searchable chat list with per-chat context % | Done |
 | 8 | Per-session selection: click opens the chat in the official Claude Code view and the bars follow it | Done |
 | 9 | Learned context window sizes per model; no percentage shown when unknown | Done |
 | 10 | Chat history browser (titles from `ai-title`, read-only transcript), grouped by project: the workspace's project and "Ungrouped" (new sessions with no folder yet) open, the rest collapsed | Done |
 | 11 | Account section: email, plan tier, organization (from the cached profile) | Done |
 | 12 | Delete a session (to the Trash by default, or permanently with the ✕ button, everywhere Claude Code keeps it), with path safety | Done |
-| 13 | Insights: tiles, 13-week heatmap, top projects, model mix, streak, 7/30/90-day switch | Done |
+| 13 | Insights: tiles, 60-day heatmap, top projects, model mix, streak, 1/7/30-day switch | Done |
 | 14 | Panel as real files under `src/views/` (HTML, CSS, script) with a strict CSP; linted and type-checked | Done |
 | 15 | Code quality pass: descriptive names, `const`-first, no sync I/O, types in `src/types.ts`, constants in `src/consts.ts`, pure `view-model.ts`, class-based `extension.ts`, ESLint enforced | Done |
 | 16 | New icon (spark inside a gauge), packaging into `release/`, README, `CLAUDE.md`, MIT license | Done |
