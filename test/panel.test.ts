@@ -128,7 +128,8 @@ const STATE: PanelState = {
     context: { percent: 55, label: '55%', caption: '1 / 2 tokens' },
     fiveHour: { percent: 85, label: '85%', caption: 'Resets in 3m' },
     session: { title: 'My chat', isPinned: true },
-    isStale: false,
+    areLimitsStale: false,
+    isContextStale: false,
     isLiveOff: false,
     note: '',
   },
@@ -218,7 +219,7 @@ test('the project dropdown keeps its options (an open list would close) until th
 
 test('panel shows empty states without crashing', async () => {
   const { elementsById, sendState } = await loadPanel();
-  sendState({ usage: { isStale: false, isLiveOff: true, note: 'Live meters are off.' }, chats: [], insights: { days: [dayInsight(11, 0)], ranges: { 1: RANGE, 7: RANGE, 30: RANGE }, streakDays: 0 } });
+  sendState({ usage: { areLimitsStale: false, isContextStale: false, isLiveOff: true, note: 'Live meters are off.' }, chats: [], insights: { days: [dayInsight(11, 0)], ranges: { 1: RANGE, 7: RANGE, 30: RANGE }, streakDays: 0 } });
   assert.match(elementsById['chat-empty'].textContent, /No chats found/);
   assert.match(elementsById['insights-body'].textContent, /No usage recorded yet/);
   assert.strictEqual(elementsById['usage-note'].textContent, 'Live meters are off.');

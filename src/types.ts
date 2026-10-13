@@ -209,7 +209,12 @@ export interface Meters {
   contextPercent: number | undefined;
   contextTokens: number | undefined;
   contextWindowSize: number | undefined;
-  isStale: boolean;
+  /** The context comes from the chat log, not from a payload (none yet, or one older than the log). */
+  isContextEstimated: boolean;
+  /** The payload is older than the log and no estimate is possible, so the context may be out of date. */
+  isContextStale: boolean;
+  /** No payload or usage query has refreshed the plan limits for ten minutes. */
+  areLimitsStale: boolean;
   /** The pinned session's log no longer exists. */
   selectedSessionIsMissing: boolean;
 }
@@ -282,7 +287,8 @@ interface PanelUsage {
   skills?: NamedAmount[];
   /** When the 5-hour and weekly numbers were last received (epoch ms); undefined when there are none. */
   limitsUpdatedAtMs?: number;
-  isStale: boolean;
+  areLimitsStale: boolean;
+  isContextStale: boolean;
   isLiveOff: boolean;
   note: string;
 }

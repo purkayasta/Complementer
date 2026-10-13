@@ -266,6 +266,46 @@ test('computeMeters: the Activate helper session feeds the limits but is never t
   assert.strictEqual(meters.contextPercent, 10);
 });
 
+test('computeMeters: queried limits stay fresh while the followed chat payload ages', () => {
+  const agedMs = NOW_MS - 20 * 60_000;
+  const queried = liveState('usage-query', { workingDirectory: '', contextPercent: undefined, contextTokens: undefined, contextWindowSize: undefined, fiveHourLimit: { percent: 30 }, updatedAt: NOW_MS - 60_000 });
+  const meters = viewModel.computeMeters({ ...baseInputs, chats: [chat('a', { modifiedAtMs: agedMs - 1000 })], liveStates: [liveState('a', { updatedAt: agedMs }), queried] });
+  assert.strictEqual(meters.areLimitsStale, false);
+  assert.strictEqual(meters.isContextStale, false);
+  assert.strictEqual(meters.contextPercent, 40);
+});
+
+test('computeMeters: limits are stale when no payload or query has refreshed them for ten minutes', () => {
+  const meters = viewModel.computeMeters({ ...baseInputs, chats: [chat('a')], liveStates: [liveState('a', { fiveHourLimit: { percent: 30 }, updatedAt: NOW_MS - 11 * 60_000 })] });
+  assert.strictEqual(meters.areLimitsStale, true);
+});
+
+test('computeMeters: a stale payload older than the chat log gives way to the log estimate', () => {
+  const agedMs = NOW_MS - 20 * 60_000;
+  const meters = viewModel.computeMeters({ ...baseInputs, chats: [chat('a', { contextTokens: 250000 })], liveStates: [liveState('a', { updatedAt: agedMs })] });
+  assert.strictEqual(meters.contextPercent, 25);
+  assert.strictEqual(meters.isContextEstimated, true);
+  assert.strictEqual(meters.isContextStale, false);
+});
+
+test('computeMeters: the context is stale only when the log moved on and no estimate is possible', () => {
+  const agedMs = NOW_MS - 20 * 60_000;
+  const meters = viewModel.computeMeters({ ...baseInputs, chats: [chat('a', { modelId: 'unknown-model' })], liveStates: [liveState('a', { updatedAt: agedMs })] });
+  assert.strictEqual(meters.contextPercent, 40);
+  assert.strictEqual(meters.isContextEstimated, false);
+  assert.strictEqual(meters.isContextStale, true);
+});
+
+test('buildPanelState: the note names only what is stale', () => {
+  const note = (liveStates: LiveState[], chats: Chat[]) => {
+    const inputs = { liveStates, chats, workspaceFolders: ['/work/app'], selectedSessionId: undefined, windowSizes: WINDOW_SIZES, nowMs: NOW_MS };
+    return viewModel.buildPanelState({ meters: viewModel.computeMeters(inputs), account: undefined, isLiveEnabled: true, insights: viewModel.computeInsights({}, new Date(NOW_MS)), ...inputs }).usage.note;
+  };
+  const agedMs = NOW_MS - 20 * 60_000;
+  assert.match(note([liveState('a', { fiveHourLimit: { percent: 1 }, updatedAt: agedMs })], [chat('a', { modifiedAtMs: agedMs - 1000 })]), /Limits are stale/);
+  assert.match(note([liveState('a', { updatedAt: agedMs }), liveState('usage-query', { workingDirectory: '', fiveHourLimit: { percent: 1 } })], [chat('a')]), /Context is estimated/);
+});
+
 test('buildPanelState: the followed chat has no payload of its own, so the note points to the refresh button', () => {
   const build = (liveStates: LiveState[]) => {
     const chats = [chat('new')];

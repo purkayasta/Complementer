@@ -54,18 +54,20 @@ export function computeMeters({ liveStates, chats, workspaceFolders, selectedSes
   const chat = selectedChat ?? findAutomaticChat(chats.filter((candidate) => !ignoredSessionIds?.has(candidate.id)), automaticSession, workspaceFolders);
   // A chat newer than the last live report (a brand-new session) has no payload yet: do not show the older session's meters for it.
   const liveSession = chat ? liveStates.find((state) => state.sessionId === chat.id) : automaticSession;
-  const derived = liveSession?.contextPercent === undefined ? contextFromTokens(chat?.contextTokens, chat?.modelId, windowSizes) : undefined;
-  const newestStatus = liveSession ?? limitsSession;
+  const hasOutdatedPayload = Boolean(liveSession && chat && isStale(liveSession, nowMs) && chat.modifiedAtMs > liveSession.updatedAt);
+  const derived = liveSession?.contextPercent === undefined || hasOutdatedPayload ? contextFromTokens(chat?.contextTokens, chat?.modelId, windowSizes) : undefined;
   return {
     liveSession,
     chat,
     limitsSession,
     fiveHour: effectiveLimit(limitsSession?.fiveHourLimit, nowMs),
     weekly: effectiveLimit(limitsSession?.weeklyLimit, nowMs),
-    contextPercent: liveSession?.contextPercent ?? derived?.percent,
-    contextTokens: liveSession?.contextTokens ?? derived?.tokens,
-    contextWindowSize: liveSession?.contextWindowSize ?? derived?.windowSize,
-    isStale: newestStatus ? isStale(newestStatus, nowMs) : false,
+    contextPercent: derived?.percent ?? liveSession?.contextPercent,
+    contextTokens: derived?.tokens ?? liveSession?.contextTokens,
+    contextWindowSize: derived?.windowSize ?? liveSession?.contextWindowSize,
+    isContextEstimated: derived !== undefined,
+    isContextStale: hasOutdatedPayload && derived === undefined,
+    areLimitsStale: limitsSession ? isStale(limitsSession, nowMs) : false,
     selectedSessionIsMissing: Boolean(selectedSessionId) && !selectedChat,
   };
 }
@@ -218,8 +220,10 @@ function statusNote(meters: Meters, hasLiveFeed: boolean, hasLiveData: boolean):
   // Claude Code's chat panel never runs the status line, so only terminal sessions fill the meters.
   if (!hasLiveData) return 'Limits need a Claude terminal session. Press ↻ to start one briefly (a few tokens).';
   // A chat that only ran in the chat panel (a new one, for example) has no payload of its own: its context is read from the log, without cost.
-  if (meters.chat && !meters.liveSession) return 'Context is estimated from the chat log. Press ↻ for its exact context and cost.';
-  return meters.isStale ? 'Stale: press ↻ to refresh.' : '';
+  if (meters.chat && (meters.isContextEstimated || !meters.liveSession)) return 'Context is estimated from the chat log. Press ↻ for its exact context and cost.';
+  if (meters.areLimitsStale && meters.isContextStale) return 'Stale: press ↻ to refresh.';
+  if (meters.areLimitsStale) return 'Limits are stale: press ↻ to refresh.';
+  return meters.isContextStale ? 'Context is stale: press ↻ to refresh.' : '';
 }
 
 /** Everything the Sessions panel draws. */
@@ -270,7 +274,8 @@ export function buildPanelState({ meters, account, liveStates, isLiveEnabled, ch
       breakdown,
       skills: sessionSkills.length ? sessionSkills : undefined,
       limitsUpdatedAtMs: meters.limitsSession?.updatedAt,
-      isStale: meters.isStale,
+      areLimitsStale: meters.areLimitsStale,
+      isContextStale: meters.isContextStale,
       isLiveOff: !hasLiveFeed,
       note: statusNote(meters, hasLiveFeed, liveStates.length > 0),
     },

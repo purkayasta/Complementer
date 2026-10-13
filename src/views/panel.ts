@@ -202,11 +202,11 @@ function renderAccount(account: PanelState['account']) {
   elements.accountRows.replaceChildren(...rows.map(([label, value]) => buildElement('div', { className: 'key-value', title: value }, buildElement('span', {}, label), buildElement('span', {}, value))));
 }
 
-function renderMeter(label: string, meter: MeterView, normalColor: string) {
+function renderMeter(label: string, meter: MeterView, normalColor: string, isStale: boolean) {
   const color = warningColor(meter.percent);
   return buildElement(
     'div',
-    { className: 'meter' },
+    { className: isStale ? 'meter stale' : 'meter' },
     buildElement('div', { className: 'meter-header' }, buildElement('span', {}, label), buildElement('span', { className: color ? 'meter-label-warning' : '', style: color ? { color } : {} }, meter.label)),
     buildElement('div', { className: 'meter-track' }, buildElement('div', { className: 'meter-fill', style: { width: `${Math.min(100, meter.percent)}%`, '--bar-color': color || normalColor } })),
     meter.caption ? buildElement('div', { className: 'muted meter-caption' }, meter.caption) : null,
@@ -224,12 +224,12 @@ function limitsAgeText(updatedAtMs: number) {
 function renderUsage(usage: PanelState['usage']) {
   limitsAge.updatedAtMs = usage.limitsUpdatedAtMs ?? 0;
   limitsAge.element = usage.limitsUpdatedAtMs ? buildElement('div', { className: 'muted limits-age' }, limitsAgeText(usage.limitsUpdatedAtMs)) : null;
-  const contextMeter = usage.context && renderMeter('Context', usage.context, PALETTE[0]);
+  const contextMeter = usage.context && renderMeter('Context', usage.context, PALETTE[0], usage.isContextStale);
   const contextDetails = renderContextDetails(usage);
   if (contextMeter) contextMeter.append(...contextDetails);
   const meters = [
-    usage.fiveHour && renderMeter('Session (5hr)', usage.fiveHour, PALETTE[1]),
-    usage.weekly && renderMeter('Weekly (7 day)', usage.weekly, PALETTE[2]),
+    usage.fiveHour && renderMeter('Session (5hr)', usage.fiveHour, PALETTE[1], usage.areLimitsStale),
+    usage.weekly && renderMeter('Weekly (7 day)', usage.weekly, PALETTE[2], usage.areLimitsStale),
     limitsAge.element,
     contextMeter,
     ...(contextMeter ? [] : contextDetails), // no context meter to sit under: the skills list still shows
@@ -238,7 +238,6 @@ function renderUsage(usage: PanelState['usage']) {
   elements.sessionLine.replaceChildren(...(usage.session ? sessionLineContent(usage.session) : []));
   elements.usageNote.textContent = usage.note;
   elements.usageNote.classList.toggle('is-clickable', usage.isLiveOff);
-  elements.usage.classList.toggle('stale', usage.isStale);
 }
 
 function sessionLineContent(session: { title: string; isPinned: boolean }) {

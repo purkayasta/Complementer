@@ -80,6 +80,8 @@ class ComplementerExtension {
 
   isRefreshingLimits = false;
 
+  hasOfferedHelperFallback = false;
+
   readonly #enqueueFileWrite = createQueue();
 
   /** Session id -> the highest cost Claude Code reported for it (session-costs.json); lets a row keep its cost after the live file is gone. */
@@ -298,7 +300,7 @@ class ComplementerExtension {
     this.statusBarItem.text = parts.length ? parts.join(' | ') : 'Ctx --';
     const worstPercent = Math.max(meters.contextPercent ?? 0, meters.fiveHour && !meters.fiveHour.hasReset ? meters.fiveHour.percent : 0, meters.weekly && !meters.weekly.hasReset ? meters.weekly.percent : 0);
     this.statusBarItem.backgroundColor = statusBarBackground(worstPercent);
-    this.statusBarItem.color = meters.isStale ? new vscode.ThemeColor('disabledForeground') : undefined;
+    this.statusBarItem.color = meters.areLimitsStale || meters.isContextStale ? new vscode.ThemeColor('disabledForeground') : undefined;
     this.statusBarItem.tooltip = this.buildTooltip(meters);
     this.statusBarItem.show();
     this.postPanel(meters);
@@ -318,7 +320,9 @@ class ComplementerExtension {
       meters.weekly ? `Weekly limit: ${describeWindow(meters.weekly)}${formatResetSuffix(meters.limitsSession?.weeklyLimit?.resetsAt, nowMs)}` : '',
       meters.liveSession?.costUsd === undefined ? '' : `Session cost: ${viewModel.formatUsd(meters.liveSession.costUsd)}`,
       todayTokens ? `Today: ${viewModel.formatTokens(todayTokens)} tokens · ${todayCostUsd === undefined ? '--' : viewModel.formatUsd(todayCostUsd)}` : '',
-      meters.isStale ? '_Live data is stale: send a message in Claude Code to refresh._' : '',
+      meters.areLimitsStale ? '_Limits are stale: press ↻ in the Sessions panel to refresh._' : '',
+      meters.isContextStale ? '_Context is stale: press ↻ in the Sessions panel to refresh._' : '',
+      meters.isContextEstimated ? '_Context is estimated from the chat log._' : '',
       this.hasLiveFeed() ? '' : `Live meters are off. [Turn on live meters](command:${CONFIG_SECTION}.enableLive) for exact values.`,
     ];
     tooltip.appendMarkdown(lines.filter(Boolean).join('\n\n'));
@@ -586,20 +590,20 @@ class ComplementerExtension {
    * fresh one instead (an Activate helper that never becomes the followed session). It never answers a trust prompt:
    * if nothing arrives in time the terminal stays open for the user. One run at a time: a second click does nothing.
    */
-  async refreshLimits(targetChat?: Chat) {
+  async refreshLimits(targetChat?: Chat, useHelperSession = false) {
     if (this.isRefreshingLimits) return;
     this.isRefreshingLimits = true;
     try {
-      await this.refreshLimitsInTerminal(targetChat);
+      await this.refreshLimitsInTerminal(targetChat, useHelperSession);
     } finally {
       this.isRefreshingLimits = false;
     }
   }
 
-  async refreshLimitsInTerminal(targetChat?: Chat) {
+  async refreshLimitsInTerminal(targetChat?: Chat, useHelperSession = false) {
     if (!this.hasLiveFeed()) await this.enableLiveMeters();
     if (!this.hasLiveFeed()) return;
-    const chat = targetChat ?? this.computeMeters().chat;
+    const chat = useHelperSession ? undefined : (targetChat ?? this.computeMeters().chat);
     const resumedChat = chat && UUID_PATTERN.test(chat.id) ? chat : undefined;
     if (resumedChat && Date.now() - resumedChat.modifiedAtMs < REFRESH_RESUME_BUSY_MS && !(await this.confirmResume(resumedChat))) return;
     const terminal = vscode.window.createTerminal({ name: 'Claude (refresh limits)', cwd: resumedChat?.workingDirectory ?? this.workspaceFolders()[0] ?? os.homedir() });
@@ -660,7 +664,10 @@ class ComplementerExtension {
     try {
       const binaryPath = await this.findClaudeBinary();
       const limits = binaryPath ? await queryUsage(binaryPath, this.storageDirectory) : undefined;
-      if (!limits) return;
+      if (!limits) {
+        this.offerHelperSession();
+        return;
+      }
       this.liveFeed.states.set(USAGE_QUERY_FILE, { sessionId: 'usage-query', workingDirectory: '', ...limits, updatedAt: Date.now() });
       const sharedPayload = JSON.stringify({ session_id: 'usage-query', rate_limits: { five_hour: toPayloadLimit(limits.fiveHourLimit), seven_day: toPayloadLimit(limits.weeklyLimit) } });
       this.#enqueueFileWrite(() => writeAtomic(path.join(this.storageDirectory, 'live', USAGE_QUERY_FILE), sharedPayload)).catch(() => {});
@@ -668,6 +675,16 @@ class ComplementerExtension {
     } finally {
       this.isQueryingUsage = false;
     }
+  }
+
+  /** When the usage query fails and no limits are known at all, offer once per window to load them through a fresh helper session (never a resumed chat), unless the setting is off. */
+  async offerHelperSession() {
+    const hasLimits = [...this.liveFeed.states.values()].some((state) => state.fiveHourLimit || state.weeklyLimit);
+    const mode = vscode.workspace.getConfiguration(CONFIG_SECTION).get<string>('autoActivateNewChats', 'ask');
+    if (hasLimits || mode === 'off' || this.hasOfferedHelperFallback || this.isRefreshingLimits || !this.hasLiveFeed()) return;
+    this.hasOfferedHelperFallback = true;
+    const answer = await vscode.window.showInformationMessage('Plan limits could not be read automatically. Load them with a short Claude session in a terminal? It sends "hi" once and uses a few tokens; your chats are not touched.', 'Load limits');
+    if (answer === 'Load limits') this.refreshLimits(undefined, true);
   }
 
   /** Move the panel next to the Claude chat. `vscode.moveViews` is undocumented, so fall back to manual instructions. */
